@@ -30,10 +30,11 @@ export default function Index() {
   const [showProcessed, setShowProcessed] = useState(false);
 
   // Calculate estimated triangles and warnings
-  const estimatedTriangles = model ? getSubdivisionTriangleCount(model.triangleCount, subdivisionLevel) : 0;
+  const baseTriangles = model ? Math.min(model.triangleCount, TRIANGLE_LIMITS.MAX) : 0;
+  const estimatedTriangles = model ? getSubdivisionTriangleCount(baseTriangles, subdivisionLevel) : 0;
   const showWarning = estimatedTriangles > TRIANGLE_LIMITS.WARNING;
   const exceedsLimit = estimatedTriangles > TRIANGLE_LIMITS.MAX;
-  const estimatedTime = model ? estimateProcessingTime(model.triangleCount, subdivisionLevel) : 0;
+  const estimatedTime = model ? estimateProcessingTime(baseTriangles, subdivisionLevel) : 0;
 
   const handleProcess = useCallback(async () => {
     if (!model) return;

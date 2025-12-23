@@ -14,7 +14,7 @@ import {
   TRIANGLE_LIMITS,
   estimateProcessingTime
 } from '@/lib/meshProcessor';
-import { export3MF, downloadBlob } from '@/lib/export3MF';
+import { export3MF, downloadBlob, MAX_TRIANGLES_WARNING, MAX_TRIANGLES_LIMIT } from '@/lib/export3MF';
 import { toast } from 'sonner';
 import { AlertCircle, ArrowLeft, AlertTriangle, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -71,10 +71,22 @@ export default function Index() {
   const handleExport = useCallback(async () => {
     if (!processingResult || !model) return;
 
+    const triCount = processingResult.processedTriangles;
+    
+    // Warn about high triangle count for OrcaSlicer
+    if (triCount > MAX_TRIANGLES_LIMIT) {
+      toast.error(`Modelo muito grande (${triCount.toLocaleString()} triângulos). OrcaSlicer pode não importar corretamente. Reduza a subdivisão.`);
+      return;
+    }
+    
+    if (triCount > MAX_TRIANGLES_WARNING) {
+      toast.warning(`Modelo grande (${triCount.toLocaleString()} triângulos). O import no OrcaSlicer pode ser lento.`);
+    }
+
     try {
       const blob = await export3MF(processingResult.exportData, model.name);
       downloadBlob(blob, `${model.name}_multi-material.3mf`);
-      toast.success('3MF exportado com sucesso!');
+      toast.success('3MF exportado para OrcaSlicer!');
     } catch (err) {
       toast.error('Erro ao exportar 3MF');
       console.error(err);

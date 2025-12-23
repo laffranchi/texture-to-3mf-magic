@@ -3,9 +3,13 @@ import * as THREE from 'three';
 import { ExportData } from './meshProcessor';
 import { rgbToHex, RGB } from './colorQuantization';
 
+// Maximum recommended triangles for OrcaSlicer compatibility
+export const MAX_TRIANGLES_WARNING = 500000;
+export const MAX_TRIANGLES_LIMIT = 1000000;
+
 /**
  * Export a solid mesh with per-triangle color assignments to 3MF format.
- * Uses basematerials with pid/p1 attributes on triangles for slicer compatibility.
+ * Uses slic3rpe:mmu_segmentation for OrcaSlicer/BambuStudio compatibility.
  */
 export async function export3MF(exportData: ExportData, filename: string = 'model'): Promise<Blob> {
   const { geometry, faceColorIndices, palette } = exportData;
@@ -30,30 +34,25 @@ export async function export3MF(exportData: ExportData, filename: string = 'mode
   zip.folder('_rels');
   zip.file('_rels/.rels', rels);
 
-  // Build the single mesh XML with per-triangle color properties
-  const meshXml = buildSolidMeshXML(geometry, faceColorIndices, palette);
+  // Build the mesh XML with per-triangle mmu_segmentation
+  const meshXml = buildSolidMeshXML(geometry, faceColorIndices);
 
-  // 3D Model with basematerials
-  const materialsXml = palette
-    .map((color, idx) => {
-      const hex = rgbToHex(color).toUpperCase();
-      return `      <base name="Color_${idx + 1}" displaycolor="${hex}" />`;
-    })
-    .join('\n');
-
+  // 3D Model with slic3rpe namespace for OrcaSlicer compatibility
   const model = `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+<model unit="millimeter" xml:lang="en-US" 
+  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+  xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">
   <metadata name="Title">${escapeXml(filename)}</metadata>
-  <metadata name="Designer">3D Texture Converter</metadata>
-  <metadata name="Description">Multi-color model for AMS printing</metadata>
+  <metadata name="Application">3D Texture Converter</metadata>
+  <metadata name="slic3rpe:Version3mf">1</metadata>
+  <metadata name="slic3rpe:MmPaintingVersion">1</metadata>
   <resources>
-    <basematerials id="1">
-${materialsXml}
-    </basematerials>
+    <object id="1" type="model">
 ${meshXml}
+    </object>
   </resources>
   <build>
-    <item objectid="2" />
+    <item objectid="1" />
   </build>
 </model>`;
 
@@ -64,18 +63,23 @@ ${meshXml}
   zip.folder('3D');
   zip.file('3D/3dmodel.model', model);
 
+  // Add Slic3r_PE_model.config for OrcaSlicer
+  const triCount = faceColorIndices.length;
+  const modelConfig = buildModelConfig(triCount, palette.length);
+  zip.folder('Metadata');
+  zip.file('Metadata/Slic3r_PE_model.config', modelConfig);
+
   const blob = await zip.generateAsync({ type: 'blob', mimeType: 'model/3mf' });
   return blob;
 }
 
 /**
- * Build mesh XML for a single solid object with per-triangle color assignments.
- * Uses vertex deduplication and assigns pid/p1 attributes to triangles.
+ * Build mesh XML for a single solid object with per-triangle mmu_segmentation.
+ * Uses slic3rpe:mmu_segmentation attribute for OrcaSlicer multi-material painting.
  */
 function buildSolidMeshXML(
   geometry: THREE.BufferGeometry,
-  faceColorIndices: number[],
-  palette: RGB[]
+  faceColorIndices: number[]
 ): string {
   const positions = geometry.getAttribute('position');
   if (!positions) return '';
@@ -102,34 +106,54 @@ function buildSolidMeshXML(
 
       if (!vertexMap.has(key)) {
         vertexMap.set(key, vertexIndex);
-        vertices.push(`        <vertex x="${x}" y="${y}" z="${z}" />`);
+        vertices.push(`          <vertex x="${x}" y="${y}" z="${z}" />`);
         vertexIndex++;
       }
 
       indices.push(vertexMap.get(key)!);
     }
 
-    // Get color index for this triangle (default to 0 if out of bounds)
+    // Get color index for this triangle (0-based)
     const colorIdx = faceColorIndices[i] ?? 0;
     
-    // pid="1" references the basematerials group (id="1")
-    // p1 is the 0-based index within basematerials for this triangle
+    // OrcaSlicer uses slic3rpe:mmu_segmentation with extruder index (1-based)
+    // The value is the extruder number as a string: "1", "2", "3", etc.
+    const extruderIndex = colorIdx + 1;
+    
     triangles.push(
-      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" pid="1" p1="${colorIdx}" />`
+      `          <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" slic3rpe:mmu_segmentation="${extruderIndex}" />`
     );
   }
 
-  // Object id="2" (id="1" is used by basematerials)
-  return `    <object id="2" type="model">
-      <mesh>
+  return `      <mesh>
         <vertices>
 ${vertices.join('\n')}
         </vertices>
         <triangles>
 ${triangles.join('\n')}
         </triangles>
-      </mesh>
-    </object>`;
+      </mesh>`;
+}
+
+/**
+ * Build Slic3r_PE_model.config for OrcaSlicer compatibility.
+ * Defines the object and volume configuration.
+ */
+function buildModelConfig(triangleCount: number, numColors: number): string {
+  // Create extruder metadata - default to extruder 1, painting will override
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="1">
+    <metadata type="object" key="name" value="MultiColorModel"/>
+    <metadata type="object" key="extruder" value="1"/>
+    <volume firstid="0" lastid="${triangleCount - 1}">
+      <metadata type="volume" key="name" value="ColoredVolume"/>
+      <metadata type="volume" key="volume_type" value="ModelPart"/>
+      <metadata type="volume" key="extruder" value="1"/>
+      <metadata type="volume" key="mmu_segmentation" value="1"/>
+    </volume>
+  </object>
+</config>`;
 }
 
 function escapeXml(str: string): string {

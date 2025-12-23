@@ -297,6 +297,7 @@ export async function extractColorsFromSources(
 }
 
 // Convert sources to a single combined geometry for further processing
+// Handles negative scale transforms by flipping winding order to avoid inverted faces
 export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeometry {
   const allPositions: number[] = [];
   const allNormals: number[] = [];
@@ -312,11 +313,18 @@ export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeo
 
     if (!posAttr) continue;
 
+    // Detect negative scale (mirroring) - determinant < 0 means winding needs to be flipped
+    const det = matrixWorld.determinant();
+    const flipWinding = det < 0;
+
     const faceCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
 
     for (let faceIdx = 0; faceIdx < faceCount; faceIdx++) {
-      for (let v = 0; v < 3; v++) {
-        const base = faceIdx * 3 + v;
+      // Get vertex indices, potentially swapped for negative scale
+      const vertOrder = flipWinding ? [0, 2, 1] : [0, 1, 2];
+      
+      for (const vOffset of vertOrder) {
+        const base = faceIdx * 3 + vOffset;
         const vertIdx = indexAttr ? indexAttr.getX(base) : base;
 
         // Transform position by matrixWorld
@@ -328,7 +336,7 @@ export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeo
         pos.applyMatrix4(matrixWorld);
         allPositions.push(pos.x, pos.y, pos.z);
 
-        // Transform normal
+        // Transform normal (and flip if needed)
         if (normAttr) {
           const norm = new THREE.Vector3(
             normAttr.getX(vertIdx),
@@ -336,6 +344,7 @@ export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeo
             normAttr.getZ(vertIdx)
           );
           norm.transformDirection(matrixWorld);
+          if (flipWinding) norm.negate();
           allNormals.push(norm.x, norm.y, norm.z);
         } else {
           allNormals.push(0, 1, 0);

@@ -6,6 +6,8 @@
 
 @layer base {
   :root {
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
     --background: 220 20% 97%;
     --foreground: 220 25% 10%;
 

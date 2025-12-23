@@ -25,13 +25,86 @@ export interface ProcessingResult {
   colorStats: { color: RGB; count: number; percentage: number }[];
 }
 
-// Simple subdivision: split each triangle into 4
-function subdivideGeometry(geometry: THREE.BufferGeometry, iterations: number): THREE.BufferGeometry {
+export interface ProcessingProgress {
+  stage: 'subdividing' | 'sampling' | 'quantizing' | 'grouping' | 'building';
+  progress: number;
+  message: string;
+}
+
+// Safety limits
+export const TRIANGLE_LIMITS = {
+  WARNING: 100000,
+  MAX: 500000,
+};
+
+// Texture sampler cache - created once per processing session
+class TextureSampler {
+  private imageData: ImageData | null = null;
+  private width: number = 0;
+  private height: number = 0;
+
+  initialize(texture: THREE.Texture | null): boolean {
+    if (!texture?.image) return false;
+
+    const image = texture.image as HTMLImageElement | HTMLCanvasElement;
+    const canvas = document.createElement('canvas');
+    this.width = image.width || 256;
+    this.height = image.height || 256;
+    canvas.width = this.width;
+    canvas.height = this.height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+
+    ctx.drawImage(image, 0, 0);
+    this.imageData = ctx.getImageData(0, 0, this.width, this.height);
+    return true;
+  }
+
+  sample(u: number, v: number): RGB {
+    if (!this.imageData) {
+      return { r: 200, g: 200, b: 200 };
+    }
+
+    // Wrap UV coordinates
+    const x = Math.floor(((u % 1) + 1) % 1 * this.width);
+    const y = Math.floor((1 - ((v % 1) + 1) % 1) * this.height);
+    
+    const idx = (y * this.width + x) * 4;
+    return {
+      r: this.imageData.data[idx],
+      g: this.imageData.data[idx + 1],
+      b: this.imageData.data[idx + 2],
+    };
+  }
+
+  dispose() {
+    this.imageData = null;
+  }
+}
+
+// Async helper to yield to UI
+async function yieldToUI(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+// Simple subdivision: split each triangle into 4 (async version)
+async function subdivideGeometryAsync(
+  geometry: THREE.BufferGeometry,
+  iterations: number,
+  onProgress: (progress: ProcessingProgress) => void
+): Promise<THREE.BufferGeometry> {
   if (iterations === 0) return geometry.clone();
 
   let currentGeometry = geometry.clone();
   
   for (let iter = 0; iter < iterations; iter++) {
+    onProgress({
+      stage: 'subdividing',
+      progress: (iter / iterations) * 100,
+      message: `Subdividindo... (iteração ${iter + 1}/${iterations})`,
+    });
+
     const positions = currentGeometry.getAttribute('position');
     const uvs = currentGeometry.getAttribute('uv');
     const normals = currentGeometry.getAttribute('normal');
@@ -43,80 +116,90 @@ function subdivideGeometry(geometry: THREE.BufferGeometry, iterations: number): 
     const newNormals: number[] = [];
 
     const triCount = positions.count / 3;
+    const BATCH_SIZE = 1000;
     
-    for (let i = 0; i < triCount; i++) {
-      const i0 = i * 3;
-      const i1 = i * 3 + 1;
-      const i2 = i * 3 + 2;
-
-      // Get vertices
-      const v0 = new THREE.Vector3().fromBufferAttribute(positions, i0);
-      const v1 = new THREE.Vector3().fromBufferAttribute(positions, i1);
-      const v2 = new THREE.Vector3().fromBufferAttribute(positions, i2);
-
-      // Midpoints
-      const m01 = v0.clone().add(v1).multiplyScalar(0.5);
-      const m12 = v1.clone().add(v2).multiplyScalar(0.5);
-      const m20 = v2.clone().add(v0).multiplyScalar(0.5);
-
-      // Get UVs
-      let uv0 = new THREE.Vector2(0, 0);
-      let uv1 = new THREE.Vector2(1, 0);
-      let uv2 = new THREE.Vector2(0.5, 1);
+    for (let batchStart = 0; batchStart < triCount; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, triCount);
       
-      if (uvs) {
-        uv0.set(uvs.getX(i0), uvs.getY(i0));
-        uv1.set(uvs.getX(i1), uvs.getY(i1));
-        uv2.set(uvs.getX(i2), uvs.getY(i2));
-      }
+      for (let i = batchStart; i < batchEnd; i++) {
+        const i0 = i * 3;
+        const i1 = i * 3 + 1;
+        const i2 = i * 3 + 2;
 
-      const uvM01 = uv0.clone().add(uv1).multiplyScalar(0.5);
-      const uvM12 = uv1.clone().add(uv2).multiplyScalar(0.5);
-      const uvM20 = uv2.clone().add(uv0).multiplyScalar(0.5);
+        // Get vertices
+        const v0 = new THREE.Vector3().fromBufferAttribute(positions, i0);
+        const v1 = new THREE.Vector3().fromBufferAttribute(positions, i1);
+        const v2 = new THREE.Vector3().fromBufferAttribute(positions, i2);
 
-      // Get normals
-      let n0 = new THREE.Vector3(0, 1, 0);
-      let n1 = new THREE.Vector3(0, 1, 0);
-      let n2 = new THREE.Vector3(0, 1, 0);
-      
-      if (normals) {
-        n0 = new THREE.Vector3().fromBufferAttribute(normals, i0);
-        n1 = new THREE.Vector3().fromBufferAttribute(normals, i1);
-        n2 = new THREE.Vector3().fromBufferAttribute(normals, i2);
-      }
+        // Midpoints
+        const m01 = v0.clone().add(v1).multiplyScalar(0.5);
+        const m12 = v1.clone().add(v2).multiplyScalar(0.5);
+        const m20 = v2.clone().add(v0).multiplyScalar(0.5);
 
-      const nM01 = n0.clone().add(n1).normalize();
-      const nM12 = n1.clone().add(n2).normalize();
-      const nM20 = n2.clone().add(n0).normalize();
-
-      // Create 4 triangles
-      const triangles = [
-        [v0, m01, m20],
-        [m01, v1, m12],
-        [m20, m12, v2],
-        [m01, m12, m20],
-      ];
-
-      const uvTriangles = [
-        [uv0, uvM01, uvM20],
-        [uvM01, uv1, uvM12],
-        [uvM20, uvM12, uv2],
-        [uvM01, uvM12, uvM20],
-      ];
-
-      const normalTriangles = [
-        [n0, nM01, nM20],
-        [nM01, n1, nM12],
-        [nM20, nM12, n2],
-        [nM01, nM12, nM20],
-      ];
-
-      for (let t = 0; t < 4; t++) {
-        for (let v = 0; v < 3; v++) {
-          newPositions.push(triangles[t][v].x, triangles[t][v].y, triangles[t][v].z);
-          newUvs.push(uvTriangles[t][v].x, uvTriangles[t][v].y);
-          newNormals.push(normalTriangles[t][v].x, normalTriangles[t][v].y, normalTriangles[t][v].z);
+        // Get UVs
+        let uv0 = new THREE.Vector2(0, 0);
+        let uv1 = new THREE.Vector2(1, 0);
+        let uv2 = new THREE.Vector2(0.5, 1);
+        
+        if (uvs) {
+          uv0.set(uvs.getX(i0), uvs.getY(i0));
+          uv1.set(uvs.getX(i1), uvs.getY(i1));
+          uv2.set(uvs.getX(i2), uvs.getY(i2));
         }
+
+        const uvM01 = uv0.clone().add(uv1).multiplyScalar(0.5);
+        const uvM12 = uv1.clone().add(uv2).multiplyScalar(0.5);
+        const uvM20 = uv2.clone().add(uv0).multiplyScalar(0.5);
+
+        // Get normals
+        let n0 = new THREE.Vector3(0, 1, 0);
+        let n1 = new THREE.Vector3(0, 1, 0);
+        let n2 = new THREE.Vector3(0, 1, 0);
+        
+        if (normals) {
+          n0 = new THREE.Vector3().fromBufferAttribute(normals, i0);
+          n1 = new THREE.Vector3().fromBufferAttribute(normals, i1);
+          n2 = new THREE.Vector3().fromBufferAttribute(normals, i2);
+        }
+
+        const nM01 = n0.clone().add(n1).normalize();
+        const nM12 = n1.clone().add(n2).normalize();
+        const nM20 = n2.clone().add(n0).normalize();
+
+        // Create 4 triangles
+        const triangles = [
+          [v0, m01, m20],
+          [m01, v1, m12],
+          [m20, m12, v2],
+          [m01, m12, m20],
+        ];
+
+        const uvTriangles = [
+          [uv0, uvM01, uvM20],
+          [uvM01, uv1, uvM12],
+          [uvM20, uvM12, uv2],
+          [uvM01, uvM12, uvM20],
+        ];
+
+        const normalTriangles = [
+          [n0, nM01, nM20],
+          [nM01, n1, nM12],
+          [nM20, nM12, n2],
+          [nM01, nM12, nM20],
+        ];
+
+        for (let t = 0; t < 4; t++) {
+          for (let v = 0; v < 3; v++) {
+            newPositions.push(triangles[t][v].x, triangles[t][v].y, triangles[t][v].z);
+            newUvs.push(uvTriangles[t][v].x, uvTriangles[t][v].y);
+            newNormals.push(normalTriangles[t][v].x, normalTriangles[t][v].y, normalTriangles[t][v].z);
+          }
+        }
+      }
+
+      // Yield to UI every batch
+      if (batchStart % (BATCH_SIZE * 5) === 0) {
+        await yieldToUI();
       }
     }
 
@@ -127,91 +210,78 @@ function subdivideGeometry(geometry: THREE.BufferGeometry, iterations: number): 
     
     currentGeometry.dispose();
     currentGeometry = newGeometry;
+
+    await yieldToUI();
   }
 
   return currentGeometry;
 }
 
-// Sample texture color at UV coordinate
-function sampleTexture(texture: THREE.Texture | null, u: number, v: number): RGB {
-  if (!texture || !texture.image) {
-    return { r: 200, g: 200, b: 200 };
-  }
-
-  const image = texture.image as HTMLImageElement | HTMLCanvasElement;
-  
-  // Create canvas to sample
-  const canvas = document.createElement('canvas');
-  canvas.width = image.width || 256;
-  canvas.height = image.height || 256;
-  
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return { r: 200, g: 200, b: 200 };
-  
-  ctx.drawImage(image, 0, 0);
-  
-  // Wrap UV coordinates
-  const x = Math.floor(((u % 1) + 1) % 1 * canvas.width);
-  const y = Math.floor((1 - ((v % 1) + 1) % 1) * canvas.height);
-  
-  const pixel = ctx.getImageData(x, y, 1, 1).data;
-  
-  return { r: pixel[0], g: pixel[1], b: pixel[2] };
-}
-
-// Get face center UV and sample color
-function getFaceColor(
+// Sample face colors using cached texture sampler (async version)
+async function sampleFaceColorsAsync(
   geometry: THREE.BufferGeometry,
-  faceIndex: number,
-  texture: THREE.Texture | null
-): RGB {
+  sampler: TextureSampler,
+  onProgress: (progress: ProcessingProgress) => void
+): Promise<RGB[]> {
   const uvAttr = geometry.getAttribute('uv');
+  const positions = geometry.getAttribute('position');
+  const totalFaces = positions ? positions.count / 3 : 0;
   
-  if (!uvAttr) {
-    return { r: 200, g: 200, b: 200 };
+  const faceColors: RGB[] = [];
+  const BATCH_SIZE = 2000;
+
+  for (let batchStart = 0; batchStart < totalFaces; batchStart += BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + BATCH_SIZE, totalFaces);
+    
+    for (let faceIndex = batchStart; faceIndex < batchEnd; faceIndex++) {
+      if (!uvAttr) {
+        faceColors.push({ r: 200, g: 200, b: 200 });
+        continue;
+      }
+
+      const i0 = faceIndex * 3;
+      const i1 = faceIndex * 3 + 1;
+      const i2 = faceIndex * 3 + 2;
+
+      // Get center UV of face
+      const u = (uvAttr.getX(i0) + uvAttr.getX(i1) + uvAttr.getX(i2)) / 3;
+      const v = (uvAttr.getY(i0) + uvAttr.getY(i1) + uvAttr.getY(i2)) / 3;
+
+      faceColors.push(sampler.sample(u, v));
+    }
+
+    // Update progress and yield
+    const progress = (batchEnd / totalFaces) * 100;
+    onProgress({
+      stage: 'sampling',
+      progress,
+      message: `Amostrando cores... ${Math.round(progress)}%`,
+    });
+
+    await yieldToUI();
   }
 
-  const i0 = faceIndex * 3;
-  const i1 = faceIndex * 3 + 1;
-  const i2 = faceIndex * 3 + 2;
-
-  // Get center UV of face
-  const u = (uvAttr.getX(i0) + uvAttr.getX(i1) + uvAttr.getX(i2)) / 3;
-  const v = (uvAttr.getY(i0) + uvAttr.getY(i1) + uvAttr.getY(i2)) / 3;
-
-  return sampleTexture(texture, u, v);
+  return faceColors;
 }
 
-export function processMesh(
+// Build meshes by color group (async version)
+async function buildMeshesByColorAsync(
   geometry: THREE.BufferGeometry,
-  texture: THREE.Texture | null,
-  subdivisionLevel: SubdivisionLevel,
-  numColors: number
-): ProcessingResult {
-  const iterations = SUBDIVISION_ITERATIONS[subdivisionLevel];
-  const subdividedGeometry = subdivideGeometry(geometry, iterations);
+  faceColorIndices: number[],
+  palette: RGB[],
+  totalFaces: number,
+  onProgress: (progress: ProcessingProgress) => void
+): Promise<{ meshes: ProcessedMesh[]; colorStats: { color: RGB; count: number; percentage: number }[] }> {
   
-  const positions = subdividedGeometry.getAttribute('position');
-  const originalPositions = geometry.getAttribute('position');
-  
-  const originalTriangles = originalPositions ? originalPositions.count / 3 : 0;
-  const processedTriangles = positions ? positions.count / 3 : 0;
-
-  // Sample colors from all faces
-  const faceColors: RGB[] = [];
-  for (let i = 0; i < processedTriangles; i++) {
-    faceColors.push(getFaceColor(subdividedGeometry, i, texture));
-  }
-
-  // Quantize colors
-  const palette = medianCut(faceColors, numColors);
-  
-  // Assign each face to nearest palette color
-  const faceColorIndices: number[] = faceColors.map(c => findNearestColor(c, palette));
+  onProgress({
+    stage: 'grouping',
+    progress: 0,
+    message: 'Agrupando faces por cor...',
+  });
 
   // Group faces by color
   const colorGroups: Map<number, number[]> = new Map();
-  for (let i = 0; i < processedTriangles; i++) {
+  for (let i = 0; i < totalFaces; i++) {
     const colorIdx = faceColorIndices[i];
     if (!colorGroups.has(colorIdx)) {
       colorGroups.set(colorIdx, []);
@@ -219,16 +289,26 @@ export function processMesh(
     colorGroups.get(colorIdx)!.push(i);
   }
 
-  // Create separate geometries for each color
+  await yieldToUI();
+
+  onProgress({
+    stage: 'building',
+    progress: 0,
+    message: 'Construindo meshes...',
+  });
+
   const meshes: ProcessedMesh[] = [];
   const colorStats: { color: RGB; count: number; percentage: number }[] = [];
+  
+  const posAttr = geometry.getAttribute('position');
+  const normAttr = geometry.getAttribute('normal');
+  
+  let processedGroups = 0;
+  const totalGroups = colorGroups.size;
 
-  colorGroups.forEach((faceIndices, colorIndex) => {
+  for (const [colorIndex, faceIndices] of colorGroups.entries()) {
     const newPositions: number[] = [];
     const newNormals: number[] = [];
-
-    const posAttr = subdividedGeometry.getAttribute('position');
-    const normAttr = subdividedGeometry.getAttribute('normal');
 
     for (const faceIdx of faceIndices) {
       for (let v = 0; v < 3; v++) {
@@ -265,22 +345,109 @@ export function processMesh(
     colorStats.push({
       color: palette[colorIndex],
       count: faceIndices.length,
-      percentage: (faceIndices.length / processedTriangles) * 100,
+      percentage: (faceIndices.length / totalFaces) * 100,
     });
-  });
 
+    processedGroups++;
+    onProgress({
+      stage: 'building',
+      progress: (processedGroups / totalGroups) * 100,
+      message: `Construindo mesh ${processedGroups}/${totalGroups}...`,
+    });
+
+    await yieldToUI();
+  }
+
+  return {
+    meshes,
+    colorStats: colorStats.sort((a, b) => b.count - a.count),
+  };
+}
+
+// Main async processing function
+export async function processMeshAsync(
+  geometry: THREE.BufferGeometry,
+  texture: THREE.Texture | null,
+  subdivisionLevel: SubdivisionLevel,
+  numColors: number,
+  onProgress: (progress: ProcessingProgress) => void
+): Promise<ProcessingResult> {
+  const iterations = SUBDIVISION_ITERATIONS[subdivisionLevel];
+  
+  // Initialize texture sampler once
+  const sampler = new TextureSampler();
+  sampler.initialize(texture);
+
+  // Subdivide geometry (async)
+  const subdividedGeometry = await subdivideGeometryAsync(geometry, iterations, onProgress);
+  
+  const positions = subdividedGeometry.getAttribute('position');
+  const originalPositions = geometry.getAttribute('position');
+  
+  const originalTriangles = originalPositions ? originalPositions.count / 3 : 0;
+  const processedTriangles = positions ? positions.count / 3 : 0;
+
+  // Sample colors from all faces (async)
+  const faceColors = await sampleFaceColorsAsync(subdividedGeometry, sampler, onProgress);
+
+  // Quantize colors
+  onProgress({
+    stage: 'quantizing',
+    progress: 50,
+    message: 'Quantizando cores...',
+  });
+  await yieldToUI();
+  
+  const palette = medianCut(faceColors, numColors);
+  
+  // Assign each face to nearest palette color
+  onProgress({
+    stage: 'quantizing',
+    progress: 75,
+    message: 'Atribuindo cores às faces...',
+  });
+  await yieldToUI();
+  
+  const faceColorIndices: number[] = faceColors.map(c => findNearestColor(c, palette));
+
+  // Build meshes by color (async)
+  const { meshes, colorStats } = await buildMeshesByColorAsync(
+    subdividedGeometry,
+    faceColorIndices,
+    palette,
+    processedTriangles,
+    onProgress
+  );
+
+  // Cleanup
   subdividedGeometry.dispose();
+  sampler.dispose();
 
   return {
     originalTriangles,
     processedTriangles,
     meshes,
     palette,
-    colorStats: colorStats.sort((a, b) => b.count - a.count),
+    colorStats,
   };
 }
 
 export function getSubdivisionTriangleCount(currentCount: number, level: SubdivisionLevel): number {
   const iterations = SUBDIVISION_ITERATIONS[level];
   return currentCount * Math.pow(4, iterations);
+}
+
+// Get recommended subdivision level based on triangle count
+export function getRecommendedSubdivision(triangleCount: number): SubdivisionLevel {
+  if (triangleCount * 64 > TRIANGLE_LIMITS.MAX) return 'none';
+  if (triangleCount * 16 > TRIANGLE_LIMITS.MAX) return 'low';
+  if (triangleCount * 4 > TRIANGLE_LIMITS.MAX) return 'medium';
+  return 'high';
+}
+
+// Estimate processing time in seconds
+export function estimateProcessingTime(triangleCount: number, level: SubdivisionLevel): number {
+  const finalCount = getSubdivisionTriangleCount(triangleCount, level);
+  // Rough estimate: ~50k triangles per second on average hardware
+  return Math.max(1, Math.round(finalCount / 50000));
 }

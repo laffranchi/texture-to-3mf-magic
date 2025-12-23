@@ -3,11 +3,20 @@ import { Header } from '@/components/Header';
 import { FileUpload } from '@/components/FileUpload';
 import { ModelViewer } from '@/components/ModelViewer';
 import { ControlPanel } from '@/components/ControlPanel';
+import { ProgressBar } from '@/components/ProgressBar';
 import { useModelLoader } from '@/hooks/useModelLoader';
-import { processMesh, SubdivisionLevel, ProcessingResult } from '@/lib/meshProcessor';
+import { 
+  processMeshAsync, 
+  SubdivisionLevel, 
+  ProcessingResult, 
+  ProcessingProgress,
+  getSubdivisionTriangleCount,
+  TRIANGLE_LIMITS,
+  estimateProcessingTime
+} from '@/lib/meshProcessor';
 import { export3MF, downloadBlob } from '@/lib/export3MF';
 import { toast } from 'sonner';
-import { AlertCircle, ArrowLeft } from 'lucide-react';
+import { AlertCircle, ArrowLeft, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 export default function Index() {
@@ -16,24 +25,35 @@ export default function Index() {
   const [subdivisionLevel, setSubdivisionLevel] = useState<SubdivisionLevel>('none');
   const [numColors, setNumColors] = useState(4);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [showProcessed, setShowProcessed] = useState(false);
+
+  // Calculate estimated triangles and warnings
+  const estimatedTriangles = model ? getSubdivisionTriangleCount(model.triangleCount, subdivisionLevel) : 0;
+  const showWarning = estimatedTriangles > TRIANGLE_LIMITS.WARNING;
+  const exceedsLimit = estimatedTriangles > TRIANGLE_LIMITS.MAX;
+  const estimatedTime = model ? estimateProcessingTime(model.triangleCount, subdivisionLevel) : 0;
 
   const handleProcess = useCallback(async () => {
     if (!model) return;
 
+    if (exceedsLimit) {
+      toast.error(`Limite excedido! Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos. Reduza a subdivisão.`);
+      return;
+    }
+
     setIsProcessing(true);
     setShowProcessed(false);
+    setProcessingProgress({ stage: 'subdividing', progress: 0, message: 'Iniciando...' });
     
     try {
-      // Use setTimeout to allow UI to update
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      const result = processMesh(
+      const result = await processMeshAsync(
         model.geometry,
         model.texture,
         subdivisionLevel,
-        numColors
+        numColors,
+        setProcessingProgress
       );
       
       setProcessingResult(result);
@@ -44,8 +64,9 @@ export default function Index() {
       console.error(err);
     } finally {
       setIsProcessing(false);
+      setProcessingProgress(null);
     }
-  }, [model, subdivisionLevel, numColors]);
+  }, [model, subdivisionLevel, numColors, exceedsLimit]);
 
   const handleExport = useCallback(async () => {
     if (!processingResult || !model) return;
@@ -152,6 +173,29 @@ export default function Index() {
                 />
               </div>
 
+              {/* Processing Progress */}
+              {isProcessing && processingProgress && (
+                <ProgressBar progress={processingProgress} />
+              )}
+
+              {/* Warning for high triangle count */}
+              {!isProcessing && showWarning && (
+                <div className="p-3 bg-warning/10 border border-warning/20 rounded-lg flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-warning">
+                      {exceedsLimit ? 'Limite excedido!' : 'Alto número de triângulos'}
+                    </p>
+                    <p className="text-xs text-warning/80">
+                      {exceedsLimit 
+                        ? `Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()}. Reduza a subdivisão.`
+                        : `Estimativa: ${estimatedTriangles.toLocaleString()} triângulos (~${estimatedTime}s)`
+                      }
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {showProcessed && processingResult && (
                 <div className="flex items-center justify-center gap-2 text-sm">
                   <span className="px-3 py-1 bg-primary/20 text-primary rounded-full">
@@ -177,6 +221,8 @@ export default function Index() {
                 onExport={handleExport}
                 colorStats={processingResult?.colorStats}
                 processedTriangles={processingResult?.processedTriangles}
+                estimatedTriangles={estimatedTriangles}
+                exceedsLimit={exceedsLimit}
               />
             </div>
           </div>

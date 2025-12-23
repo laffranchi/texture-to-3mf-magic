@@ -47,6 +47,10 @@ interface ControlPanelProps {
   // Results
   colorStats?: { color: RGB; count: number; percentage: number }[];
   processedTriangles?: number;
+  
+  // Safety
+  estimatedTriangles?: number;
+  exceedsLimit?: boolean;
 }
 
 export function ControlPanel({
@@ -63,8 +67,10 @@ export function ControlPanel({
   onExport,
   colorStats,
   processedTriangles,
+  estimatedTriangles: propEstimatedTriangles,
+  exceedsLimit = false,
 }: ControlPanelProps) {
-  const estimatedTriangles = getSubdivisionTriangleCount(originalTriangles, subdivisionLevel);
+  const estimatedTriangles = propEstimatedTriangles ?? getSubdivisionTriangleCount(originalTriangles, subdivisionLevel);
 
   return (
     <div className="space-y-6 p-6 bg-card rounded-lg border border-border">
@@ -103,8 +109,14 @@ export function ControlPanel({
             </button>
           ))}
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          Estimativa: <span className="font-mono text-foreground">{estimatedTriangles.toLocaleString()}</span> triângulos
+        <p className={cn(
+          "mt-2 text-xs",
+          exceedsLimit ? "text-destructive" : "text-muted-foreground"
+        )}>
+          Estimativa: <span className={cn("font-mono", exceedsLimit ? "text-destructive" : "text-foreground")}>
+            {estimatedTriangles.toLocaleString()}
+          </span> triângulos
+          {exceedsLimit && " (limite excedido!)"}
         </p>
       </div>
 
@@ -135,15 +147,18 @@ export function ControlPanel({
       {/* Process Button */}
       <Button
         onClick={onProcess}
-        disabled={isProcessing}
+        disabled={isProcessing || exceedsLimit}
         className="w-full"
         size="lg"
+        variant={exceedsLimit ? "destructive" : "default"}
       >
         {isProcessing ? (
           <>
             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
             Processando...
           </>
+        ) : exceedsLimit ? (
+          'Limite Excedido'
         ) : (
           'Processar Cores'
         )}

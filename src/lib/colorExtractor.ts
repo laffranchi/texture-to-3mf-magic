@@ -296,12 +296,16 @@ export async function extractColorsFromSources(
   };
 }
 
-// Convert sources to a single combined geometry for further processing
+// Convert sources to a single combined INDEXED geometry for further processing
+// This is critical for simplification: meshoptimizer requires indexed geometry with shared vertices
 // Handles negative scale transforms by flipping winding order to avoid inverted faces
 export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeometry {
   const allPositions: number[] = [];
   const allNormals: number[] = [];
   const allUvs: number[] = [];
+  const allIndices: number[] = [];
+  
+  let globalVertexOffset = 0;
 
   for (const source of sources) {
     const { geometry, matrixWorld } = source;
@@ -317,54 +321,92 @@ export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeo
     const det = matrixWorld.determinant();
     const flipWinding = det < 0;
 
-    const faceCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+    const vertexCount = posAttr.count;
+    
+    // First: add all vertices from this mesh (transformed)
+    for (let vi = 0; vi < vertexCount; vi++) {
+      // Transform position by matrixWorld
+      const pos = new THREE.Vector3(
+        posAttr.getX(vi),
+        posAttr.getY(vi),
+        posAttr.getZ(vi)
+      );
+      pos.applyMatrix4(matrixWorld);
+      allPositions.push(pos.x, pos.y, pos.z);
 
-    for (let faceIdx = 0; faceIdx < faceCount; faceIdx++) {
-      // Get vertex indices, potentially swapped for negative scale
-      const vertOrder = flipWinding ? [0, 2, 1] : [0, 1, 2];
-      
-      for (const vOffset of vertOrder) {
-        const base = faceIdx * 3 + vOffset;
-        const vertIdx = indexAttr ? indexAttr.getX(base) : base;
-
-        // Transform position by matrixWorld
-        const pos = new THREE.Vector3(
-          posAttr.getX(vertIdx),
-          posAttr.getY(vertIdx),
-          posAttr.getZ(vertIdx)
+      // Transform normal (and flip if needed)
+      if (normAttr && vi < normAttr.count) {
+        const norm = new THREE.Vector3(
+          normAttr.getX(vi),
+          normAttr.getY(vi),
+          normAttr.getZ(vi)
         );
-        pos.applyMatrix4(matrixWorld);
-        allPositions.push(pos.x, pos.y, pos.z);
+        norm.transformDirection(matrixWorld);
+        if (flipWinding) norm.negate();
+        allNormals.push(norm.x, norm.y, norm.z);
+      } else {
+        allNormals.push(0, 1, 0);
+      }
 
-        // Transform normal (and flip if needed)
-        if (normAttr) {
-          const norm = new THREE.Vector3(
-            normAttr.getX(vertIdx),
-            normAttr.getY(vertIdx),
-            normAttr.getZ(vertIdx)
-          );
-          norm.transformDirection(matrixWorld);
-          if (flipWinding) norm.negate();
-          allNormals.push(norm.x, norm.y, norm.z);
+      // Copy UVs
+      if (uvAttr && vi < uvAttr.count) {
+        allUvs.push(uvAttr.getX(vi), uvAttr.getY(vi));
+      } else {
+        allUvs.push(0, 0);
+      }
+    }
+
+    // Second: add indices, adjusted by globalVertexOffset
+    if (indexAttr) {
+      // Source has index buffer - copy indices with offset
+      const faceCount = indexAttr.count / 3;
+      for (let fi = 0; fi < faceCount; fi++) {
+        const base = fi * 3;
+        let i0 = indexAttr.getX(base) + globalVertexOffset;
+        let i1 = indexAttr.getX(base + 1) + globalVertexOffset;
+        let i2 = indexAttr.getX(base + 2) + globalVertexOffset;
+        
+        // Flip winding if needed
+        if (flipWinding) {
+          allIndices.push(i0, i2, i1);
         } else {
-          allNormals.push(0, 1, 0);
+          allIndices.push(i0, i1, i2);
         }
-
-        // Copy UVs
-        if (uvAttr) {
-          allUvs.push(uvAttr.getX(vertIdx), uvAttr.getY(vertIdx));
+      }
+    } else {
+      // Non-indexed geometry: create sequential indices
+      const faceCount = vertexCount / 3;
+      for (let fi = 0; fi < faceCount; fi++) {
+        const base = fi * 3;
+        let i0 = base + globalVertexOffset;
+        let i1 = base + 1 + globalVertexOffset;
+        let i2 = base + 2 + globalVertexOffset;
+        
+        // Flip winding if needed
+        if (flipWinding) {
+          allIndices.push(i0, i2, i1);
         } else {
-          allUvs.push(0, 0);
+          allIndices.push(i0, i1, i2);
         }
       }
     }
+    
+    globalVertexOffset += vertexCount;
   }
 
   const combinedGeometry = new THREE.BufferGeometry();
   combinedGeometry.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3));
   combinedGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(allNormals, 3));
   combinedGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(allUvs, 2));
+  combinedGeometry.setIndex(allIndices);
   combinedGeometry.computeBoundingBox();
+
+  console.log('[combineSourcesToGeometry] Created indexed geometry:', {
+    vertices: allPositions.length / 3,
+    indices: allIndices.length,
+    triangles: allIndices.length / 3,
+    hasIndex: true
+  });
 
   return combinedGeometry;
 }

@@ -51,6 +51,15 @@ export async function simplifyGeometryAsync(
   const clampedTargetTriangles = Math.max(1, Math.min(targetTriangles, originalTriangles));
   const targetIndexCount = Math.floor(clampedTargetTriangles * 3);
 
+  console.log('[simplifyGeometryAsync] Input:', {
+    vertices: posAttr.count,
+    hasIndex: !!geometry.getIndex(),
+    originalTriangles,
+    targetTriangles: clampedTargetTriangles,
+    targetIndexCount,
+    targetError
+  });
+
   const [simplifiedIndices, error] = MeshoptSimplifier.simplify(
     indices,
     positions,
@@ -58,6 +67,20 @@ export async function simplifyGeometryAsync(
     targetIndexCount,
     targetError
   );
+
+  const resultTriangles = simplifiedIndices.length / 3;
+  
+  console.log('[simplifyGeometryAsync] Output:', {
+    resultTriangles,
+    reduction: `${((1 - resultTriangles / originalTriangles) * 100).toFixed(1)}%`,
+    error
+  });
+
+  // Check if simplification was effective
+  if (resultTriangles >= originalTriangles * 0.95 && targetTriangles < originalTriangles * 0.5) {
+    console.warn('[simplifyGeometryAsync] Warning: Simplification was not effective. ' +
+      'This may be due to non-indexed geometry or disconnected mesh topology.');
+  }
 
   const simplifiedGeometry = new THREE.BufferGeometry();
   simplifiedGeometry.setAttribute('position', posAttr);

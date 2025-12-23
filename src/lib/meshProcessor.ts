@@ -334,14 +334,28 @@ export async function processMeshAsync(
   console.log('[processMeshAsync] Extracted colors from', originalFaceColors.length, 'faces');
   console.log('[processMeshAsync] Debug info:', debugInfo);
 
-  // Step 2: Combine all sources into a single geometry
+  // Step 2: Combine all sources into a single INDEXED geometry
   const combinedGeometry = combineSourcesToGeometry(sources);
   const originalTriangles = getTriangleCount(combinedGeometry);
+
+  console.log('[processMeshAsync] Combined geometry:', {
+    vertices: combinedGeometry.getAttribute('position')?.count,
+    hasIndex: !!combinedGeometry.getIndex(),
+    triangles: originalTriangles
+  });
 
   // Step 3: Determine target triangle count based on detail level
   const targetTriangles = DETAIL_TARGETS[detailLevel];
   const needsSimplification = originalTriangles > targetTriangles;
   const needsSubdivision = originalTriangles < 100000 && detailLevel !== 'low';
+
+  console.log('[processMeshAsync] Processing plan:', {
+    originalTriangles,
+    targetTriangles,
+    needsSimplification,
+    needsSubdivision,
+    detailLevel
+  });
 
   let baseGeometry = combinedGeometry;
   let baseFaceColors = originalFaceColors;
@@ -357,7 +371,18 @@ export async function processMeshAsync(
     });
 
     const simplified = await simplifyGeometryAsync(combinedGeometry, simplifyTarget, 0.01);
-    baseGeometry = simplified.geometry;
+    
+    // IMPORTANT: Convert simplified (indexed) geometry to non-indexed for the rest of the pipeline
+    // The buildMeshesByColorAsync and color mapping expect non-indexed geometry (vertex per face)
+    const nonIndexedSimplified = simplified.geometry.toNonIndexed();
+    simplified.geometry.dispose();
+    baseGeometry = nonIndexedSimplified;
+
+    console.log('[processMeshAsync] After simplification:', {
+      simplifiedTriangles: simplified.triangles,
+      convertedToNonIndexed: true,
+      finalVertices: baseGeometry.getAttribute('position')?.count
+    });
 
     // Resample colors for simplified geometry
     const simplifiedFaceCount = getTriangleCount(baseGeometry);
@@ -367,6 +392,11 @@ export async function processMeshAsync(
       for (let i = 0; i < originalFaceColors.length && baseFaceColors.length < simplifiedFaceCount; i += stride) {
         baseFaceColors.push(originalFaceColors[i]);
       }
+      console.log('[processMeshAsync] Resampled colors:', {
+        originalColors: originalFaceColors.length,
+        resampledColors: baseFaceColors.length,
+        stride
+      });
     }
 
     onProgress({

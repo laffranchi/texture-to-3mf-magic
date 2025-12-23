@@ -10,14 +10,12 @@ interface OriginalModelProps {
 }
 
 function OriginalModel({ object }: OriginalModelProps) {
-  const groupRef = useRef<THREE.Group>(null);
-  
   const clonedScene = useMemo(() => {
     return object.clone();
   }, [object]);
 
   return (
-    <group ref={groupRef}>
+    <group>
       <primitive object={clonedScene} />
     </group>
   );
@@ -32,10 +30,9 @@ function ProcessedModel({ meshes }: ProcessedModelProps) {
     <group>
       {meshes.map((mesh, idx) => (
         <mesh key={idx} geometry={mesh.geometry}>
-          <meshStandardMaterial 
+          {/* Use MeshBasicMaterial for true color display (unlit) */}
+          <meshBasicMaterial 
             color={rgbToHex(mesh.color)} 
-            roughness={0.7}
-            metalness={0.1}
           />
         </mesh>
       ))}
@@ -87,13 +84,15 @@ export function ModelViewer({
         
         <Suspense fallback={<LoadingFallback />}>
           <Center>
-            {showProcessed && processedMeshes ? (
-              <ProcessedModel meshes={processedMeshes} />
-            ) : originalObject ? (
-              <OriginalModel object={originalObject} />
-            ) : (
-              <LoadingFallback />
-            )}
+            <group>
+              {showProcessed && processedMeshes ? (
+                <ProcessedModel meshes={processedMeshes} />
+              ) : originalObject ? (
+                <OriginalModel object={originalObject} />
+              ) : (
+                <LoadingFallback />
+              )}
+            </group>
           </Center>
         </Suspense>
 

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RGB, medianCut, findNearestColor } from './colorQuantization';
 import { simplifyGeometryAsync, getTriangleCount } from './meshSimplifier';
+import { MeshSource, extractColorsFromSources, combineSourcesToGeometry } from './colorExtractor';
 
 export type SubdivisionLevel = 'none' | 'low' | 'medium' | 'high';
 
@@ -24,6 +25,15 @@ export interface ProcessingResult {
   meshes: ProcessedMesh[];
   palette: RGB[];
   colorStats: { color: RGB; count: number; percentage: number }[];
+  debugInfo?: {
+    totalMeshes: number;
+    totalMaterials: number;
+    texturedMaterials: number;
+    vertexColorMeshes: number;
+    facesWithTexture: number;
+    facesWithVertexColor: number;
+    facesWithMaterialColor: number;
+  };
 }
 
 export interface ProcessingProgress {
@@ -40,123 +50,6 @@ export const TRIANGLE_LIMITS = {
 
 const MAX_QUANTIZATION_SAMPLES = 50000;
 
-// Texture sampler cache - created once per processing session
-class TextureSampler {
-  private imageData: ImageData | null = null;
-  private width: number = 0;
-  private height: number = 0;
-  private hasTexture: boolean = false;
-
-  async initialize(texture: THREE.Texture | null): Promise<boolean> {
-    if (!texture?.image) {
-      console.warn('[TextureSampler] No texture or texture.image provided');
-      return false;
-    }
-
-    const image = texture.image;
-    
-    // Support HTMLImageElement, HTMLCanvasElement, and ImageBitmap
-    let sourceWidth = 0;
-    let sourceHeight = 0;
-    let drawSource: CanvasImageSource | null = null;
-
-    if (image instanceof HTMLImageElement) {
-      // Wait for image to load if not ready
-      if (!image.complete || image.naturalWidth === 0) {
-        console.log('[TextureSampler] Waiting for HTMLImageElement to load...');
-        await new Promise<void>((resolve, reject) => {
-          image.onload = () => resolve();
-          image.onerror = () => reject(new Error('Image failed to load'));
-          // If already loaded, resolve immediately
-          if (image.complete && image.naturalWidth > 0) resolve();
-        });
-      }
-      sourceWidth = image.naturalWidth || image.width;
-      sourceHeight = image.naturalHeight || image.height;
-      drawSource = image;
-      console.log(`[TextureSampler] HTMLImageElement: ${sourceWidth}x${sourceHeight}`);
-    } else if (image instanceof HTMLCanvasElement) {
-      sourceWidth = image.width;
-      sourceHeight = image.height;
-      drawSource = image;
-      console.log(`[TextureSampler] HTMLCanvasElement: ${sourceWidth}x${sourceHeight}`);
-    } else if (typeof ImageBitmap !== 'undefined' && image instanceof ImageBitmap) {
-      sourceWidth = image.width;
-      sourceHeight = image.height;
-      drawSource = image;
-      console.log(`[TextureSampler] ImageBitmap: ${sourceWidth}x${sourceHeight}`);
-    } else if (image.width && image.height) {
-      // Fallback for other image-like objects
-      sourceWidth = image.width;
-      sourceHeight = image.height;
-      drawSource = image as CanvasImageSource;
-      console.log(`[TextureSampler] Unknown image type with dimensions: ${sourceWidth}x${sourceHeight}`);
-    }
-
-    if (!drawSource || sourceWidth === 0 || sourceHeight === 0) {
-      console.warn('[TextureSampler] Invalid image source or zero dimensions');
-      return false;
-    }
-
-    this.width = sourceWidth;
-    this.height = sourceHeight;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = this.width;
-    canvas.height = this.height;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      console.warn('[TextureSampler] Could not get canvas 2d context');
-      return false;
-    }
-
-    try {
-      ctx.drawImage(drawSource, 0, 0, this.width, this.height);
-      this.imageData = ctx.getImageData(0, 0, this.width, this.height);
-      this.hasTexture = true;
-      console.log(`[TextureSampler] Successfully initialized with ${this.width}x${this.height} texture`);
-      return true;
-    } catch (e) {
-      console.error('[TextureSampler] Error drawing image to canvas:', e);
-      return false;
-    }
-  }
-
-  sample(u: number, v: number): RGB {
-    if (!this.imageData || !this.hasTexture) {
-      // Fallback: magenta to make it obvious there's no texture
-      return { r: 255, g: 0, b: 255 };
-    }
-
-    // Wrap UV coordinates properly and clamp to valid range
-    const wrappedU = ((u % 1) + 1) % 1;
-    const wrappedV = ((v % 1) + 1) % 1;
-    
-    // Convert to pixel coordinates, clamping to valid range
-    const x = Math.min(this.width - 1, Math.max(0, Math.floor(wrappedU * this.width)));
-    const y = Math.min(this.height - 1, Math.max(0, Math.floor((1 - wrappedV) * this.height)));
-
-    const idx = (y * this.width + x) * 4;
-    
-    // Additional bounds check
-    if (idx < 0 || idx + 2 >= this.imageData.data.length) {
-      return { r: 255, g: 0, b: 255 };
-    }
-
-    return {
-      r: this.imageData.data[idx],
-      g: this.imageData.data[idx + 1],
-      b: this.imageData.data[idx + 2],
-    };
-  }
-
-  dispose() {
-    this.imageData = null;
-    this.hasTexture = false;
-  }
-}
-
 // Async helper to yield to UI
 async function yieldToUI(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -170,7 +63,6 @@ async function subdivideGeometryAsync(
 ): Promise<THREE.BufferGeometry> {
   if (iterations === 0) return geometry.clone();
 
-  // Our subdivision code expects non-indexed triangles.
   let currentGeometry = geometry.clone();
   if (currentGeometry.index) {
     const nonIndexed = currentGeometry.toNonIndexed();
@@ -206,17 +98,14 @@ async function subdivideGeometryAsync(
         const i1 = i * 3 + 1;
         const i2 = i * 3 + 2;
 
-        // Get vertices
         const v0 = new THREE.Vector3().fromBufferAttribute(positions, i0);
         const v1 = new THREE.Vector3().fromBufferAttribute(positions, i1);
         const v2 = new THREE.Vector3().fromBufferAttribute(positions, i2);
 
-        // Midpoints
         const m01 = v0.clone().add(v1).multiplyScalar(0.5);
         const m12 = v1.clone().add(v2).multiplyScalar(0.5);
         const m20 = v2.clone().add(v0).multiplyScalar(0.5);
 
-        // Get UVs
         let uv0 = new THREE.Vector2(0, 0);
         let uv1 = new THREE.Vector2(1, 0);
         let uv2 = new THREE.Vector2(0.5, 1);
@@ -231,7 +120,6 @@ async function subdivideGeometryAsync(
         const uvM12 = uv1.clone().add(uv2).multiplyScalar(0.5);
         const uvM20 = uv2.clone().add(uv0).multiplyScalar(0.5);
 
-        // Get normals
         let n0 = new THREE.Vector3(0, 1, 0);
         let n1 = new THREE.Vector3(0, 1, 0);
         let n2 = new THREE.Vector3(0, 1, 0);
@@ -246,7 +134,6 @@ async function subdivideGeometryAsync(
         const nM12 = n1.clone().add(n2).normalize();
         const nM20 = n2.clone().add(n0).normalize();
 
-        // Create 4 triangles
         const triangles = [
           [v0, m01, m20],
           [m01, v1, m12],
@@ -277,7 +164,6 @@ async function subdivideGeometryAsync(
         }
       }
 
-      // Yield to UI every few batches
       if (batchStart % (BATCH_SIZE * 5) === 0) {
         await yieldToUI();
       }
@@ -297,57 +183,22 @@ async function subdivideGeometryAsync(
   return currentGeometry;
 }
 
-// Sample face colors using cached texture sampler (async version)
-async function sampleFaceColorsAsync(
-  geometry: THREE.BufferGeometry,
-  sampler: TextureSampler,
-  onProgress: (progress: ProcessingProgress) => void
-): Promise<RGB[]> {
-  const uvAttr = geometry.getAttribute('uv');
-  const posAttr = geometry.getAttribute('position');
-  const indexAttr = geometry.getIndex();
+// Subdivide colors array to match subdivided geometry
+function subdivideColors(colors: RGB[], iterations: number): RGB[] {
+  if (iterations === 0) return colors;
 
-  const totalFaces = indexAttr
-    ? indexAttr.count / 3
-    : posAttr
-      ? posAttr.count / 3
-      : 0;
-
-  const faceColors: RGB[] = [];
-  const BATCH_SIZE = 2000;
-
-  for (let batchStart = 0; batchStart < totalFaces; batchStart += BATCH_SIZE) {
-    const batchEnd = Math.min(batchStart + BATCH_SIZE, totalFaces);
-
-    for (let faceIndex = batchStart; faceIndex < batchEnd; faceIndex++) {
-      if (!uvAttr) {
-        faceColors.push({ r: 200, g: 200, b: 200 });
-        continue;
-      }
-
-      const base = faceIndex * 3;
-      const vi0 = indexAttr ? indexAttr.getX(base) : base;
-      const vi1 = indexAttr ? indexAttr.getX(base + 1) : base + 1;
-      const vi2 = indexAttr ? indexAttr.getX(base + 2) : base + 2;
-
-      // Get center UV of face
-      const u = (uvAttr.getX(vi0) + uvAttr.getX(vi1) + uvAttr.getX(vi2)) / 3;
-      const v = (uvAttr.getY(vi0) + uvAttr.getY(vi1) + uvAttr.getY(vi2)) / 3;
-
-      faceColors.push(sampler.sample(u, v));
+  let currentColors = colors;
+  
+  for (let iter = 0; iter < iterations; iter++) {
+    const newColors: RGB[] = [];
+    for (const color of currentColors) {
+      // Each triangle becomes 4 triangles, all with the same color
+      newColors.push(color, color, color, color);
     }
-
-    const progress = totalFaces === 0 ? 100 : (batchEnd / totalFaces) * 100;
-    onProgress({
-      stage: 'sampling',
-      progress,
-      message: `Amostrando cores... ${Math.round(progress)}%`,
-    });
-
-    await yieldToUI();
+    currentColors = newColors;
   }
 
-  return faceColors;
+  return currentColors;
 }
 
 // Build meshes by color group (async version)
@@ -386,7 +237,6 @@ async function buildMeshesByColorAsync(
 
   const posAttr = geometry.getAttribute('position');
   const normAttr = geometry.getAttribute('normal');
-  const indexAttr = geometry.getIndex();
 
   let processedGroups = 0;
   const totalGroups = colorGroups.size;
@@ -397,8 +247,7 @@ async function buildMeshesByColorAsync(
 
     for (const faceIdx of faceIndices) {
       for (let v = 0; v < 3; v++) {
-        const base = faceIdx * 3 + v;
-        const vertIdx = indexAttr ? indexAttr.getX(base) : base;
+        const vertIdx = faceIdx * 3 + v;
 
         newPositions.push(posAttr.getX(vertIdx), posAttr.getY(vertIdx), posAttr.getZ(vertIdx));
         if (normAttr) {
@@ -444,25 +293,36 @@ async function buildMeshesByColorAsync(
 }
 
 export async function processMeshAsync(
-  geometry: THREE.BufferGeometry,
-  texture: THREE.Texture | null,
+  sources: MeshSource[],
   subdivisionLevel: SubdivisionLevel,
   numColors: number,
   onProgress: (progress: ProcessingProgress) => void
 ): Promise<ProcessingResult> {
   const iterations = SUBDIVISION_ITERATIONS[subdivisionLevel];
 
-  const sampler = new TextureSampler();
-  const textureLoaded = await sampler.initialize(texture);
-  
-  if (!textureLoaded) {
-    console.warn('[processMeshAsync] Texture not loaded - colors will use fallback');
-  }
+  // Step 1: Extract colors from all sources BEFORE combining
+  onProgress({
+    stage: 'sampling',
+    progress: 0,
+    message: 'Extraindo cores dos materiais...',
+  });
 
-  const originalTriangles = getTriangleCount(geometry);
+  const { faceColors: originalFaceColors, debugInfo } = await extractColorsFromSources(
+    sources,
+    (progress, message) => onProgress({ stage: 'sampling', progress, message })
+  );
 
-  // If the input mesh is already huge, simplify first (browser safety).
-  let baseGeometry: THREE.BufferGeometry = geometry;
+  console.log('[processMeshAsync] Extracted colors from', originalFaceColors.length, 'faces');
+  console.log('[processMeshAsync] Debug info:', debugInfo);
+
+  // Step 2: Combine all sources into a single geometry
+  const combinedGeometry = combineSourcesToGeometry(sources);
+  const originalTriangles = getTriangleCount(combinedGeometry);
+
+  // Step 3: Simplify if too large
+  let baseGeometry = combinedGeometry;
+  let baseFaceColors = originalFaceColors;
+
   if (originalTriangles > TRIANGLE_LIMITS.MAX) {
     onProgress({
       stage: 'simplifying',
@@ -470,8 +330,19 @@ export async function processMeshAsync(
       message: `Simplificando malha grande (${originalTriangles.toLocaleString()} → ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos)...`,
     });
 
-    const simplified = await simplifyGeometryAsync(geometry, TRIANGLE_LIMITS.MAX, 0.01);
+    const simplified = await simplifyGeometryAsync(combinedGeometry, TRIANGLE_LIMITS.MAX, 0.01);
     baseGeometry = simplified.geometry;
+
+    // For simplification, we need to resample colors (simplified geometry has fewer faces)
+    // For now, we'll just keep the colors aligned (this may need improvement)
+    const simplifiedFaceCount = getTriangleCount(baseGeometry);
+    if (simplifiedFaceCount < originalFaceColors.length) {
+      const stride = Math.max(1, Math.floor(originalFaceColors.length / simplifiedFaceCount));
+      baseFaceColors = [];
+      for (let i = 0; i < originalFaceColors.length && baseFaceColors.length < simplifiedFaceCount; i += stride) {
+        baseFaceColors.push(originalFaceColors[i]);
+      }
+    }
 
     onProgress({
       stage: 'simplifying',
@@ -482,15 +353,16 @@ export async function processMeshAsync(
     await yieldToUI();
   }
 
-  // Subdivide geometry (async)
+  // Step 4: Subdivide geometry
   const subdividedGeometry = await subdivideGeometryAsync(baseGeometry, iterations, onProgress);
-
   const processedTriangles = getTriangleCount(subdividedGeometry);
 
-  // Sample colors from all faces (async)
-  const faceColors = await sampleFaceColorsAsync(subdividedGeometry, sampler, onProgress);
+  // Step 5: Subdivide colors to match
+  const subdividedFaceColors = subdivideColors(baseFaceColors, iterations);
 
-  // Quantize colors (sampled for speed)
+  console.log('[processMeshAsync] After subdivision:', processedTriangles, 'triangles,', subdividedFaceColors.length, 'colors');
+
+  // Step 6: Quantize colors
   onProgress({
     stage: 'quantizing',
     progress: 25,
@@ -499,19 +371,19 @@ export async function processMeshAsync(
   await yieldToUI();
 
   const colorsForQuantization = (() => {
-    if (faceColors.length <= MAX_QUANTIZATION_SAMPLES) return faceColors;
+    if (subdividedFaceColors.length <= MAX_QUANTIZATION_SAMPLES) return subdividedFaceColors;
 
-    const stride = Math.max(1, Math.floor(faceColors.length / MAX_QUANTIZATION_SAMPLES));
+    const stride = Math.max(1, Math.floor(subdividedFaceColors.length / MAX_QUANTIZATION_SAMPLES));
     const sampled: RGB[] = [];
-    for (let i = 0; i < faceColors.length && sampled.length < MAX_QUANTIZATION_SAMPLES; i += stride) {
-      sampled.push(faceColors[i]);
+    for (let i = 0; i < subdividedFaceColors.length && sampled.length < MAX_QUANTIZATION_SAMPLES; i += stride) {
+      sampled.push(subdividedFaceColors[i]);
     }
     return sampled;
   })();
 
   const palette = medianCut(colorsForQuantization, numColors);
 
-  // Assign each face to nearest palette color
+  // Step 7: Assign each face to nearest palette color
   onProgress({
     stage: 'quantizing',
     progress: 70,
@@ -519,9 +391,9 @@ export async function processMeshAsync(
   });
   await yieldToUI();
 
-  const faceColorIndices: number[] = faceColors.map((c) => findNearestColor(c, palette));
+  const faceColorIndices: number[] = subdividedFaceColors.map((c) => findNearestColor(c, palette));
 
-  // Build meshes by color (async)
+  // Step 8: Build meshes by color
   const { meshes, colorStats } = await buildMeshesByColorAsync(
     subdividedGeometry,
     faceColorIndices,
@@ -531,7 +403,10 @@ export async function processMeshAsync(
   );
 
   subdividedGeometry.dispose();
-  sampler.dispose();
+  if (baseGeometry !== combinedGeometry) {
+    baseGeometry.dispose();
+  }
+  combinedGeometry.dispose();
 
   return {
     originalTriangles,
@@ -539,6 +414,7 @@ export async function processMeshAsync(
     meshes,
     palette,
     colorStats,
+    debugInfo,
   };
 }
 
@@ -547,7 +423,6 @@ export function getSubdivisionTriangleCount(currentCount: number, level: Subdivi
   return currentCount * Math.pow(4, iterations);
 }
 
-// Get recommended subdivision level based on triangle count
 export function getRecommendedSubdivision(triangleCount: number): SubdivisionLevel {
   if (triangleCount * 64 > TRIANGLE_LIMITS.MAX) return 'none';
   if (triangleCount * 16 > TRIANGLE_LIMITS.MAX) return 'low';
@@ -555,9 +430,7 @@ export function getRecommendedSubdivision(triangleCount: number): SubdivisionLev
   return 'high';
 }
 
-// Estimate processing time in seconds
 export function estimateProcessingTime(triangleCount: number, level: SubdivisionLevel): number {
   const finalCount = getSubdivisionTriangleCount(triangleCount, level);
-  // Rough estimate: ~50k triangles per second on average hardware
   return Math.max(1, Math.round(finalCount / 50000));
 }

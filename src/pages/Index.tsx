@@ -72,7 +72,7 @@ export default function Index() {
     if (!processingResult || !model) return;
 
     try {
-      const blob = await export3MF(processingResult.meshes, model.name);
+      const blob = await export3MF(processingResult.exportData, model.name);
       downloadBlob(blob, `${model.name}_multi-material.3mf`);
       toast.success('3MF exportado com sucesso!');
     } catch (err) {

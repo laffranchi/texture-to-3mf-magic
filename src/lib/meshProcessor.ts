@@ -19,12 +19,23 @@ export interface ProcessedMesh {
   faceCount: number;
 }
 
+export interface ExportData {
+  /** Combined geometry with all faces (for solid mesh export) */
+  geometry: THREE.BufferGeometry;
+  /** Color palette index for each triangle (aligned with geometry) */
+  faceColorIndices: number[];
+  /** The quantized color palette */
+  palette: RGB[];
+}
+
 export interface ProcessingResult {
   originalTriangles: number;
   processedTriangles: number;
   meshes: ProcessedMesh[];
   palette: RGB[];
   colorStats: { color: RGB; count: number; percentage: number }[];
+  /** Export data for 3MF: single solid mesh with per-triangle colors */
+  exportData: ExportData;
   debugInfo?: {
     totalMeshes: number;
     totalMaterials: number;
@@ -393,7 +404,7 @@ export async function processMeshAsync(
 
   const faceColorIndices: number[] = subdividedFaceColors.map((c) => findNearestColor(c, palette));
 
-  // Step 8: Build meshes by color
+  // Step 8: Build meshes by color (for preview/visualization)
   const { meshes, colorStats } = await buildMeshesByColorAsync(
     subdividedGeometry,
     faceColorIndices,
@@ -401,6 +412,9 @@ export async function processMeshAsync(
     processedTriangles,
     onProgress
   );
+
+  // Create export data: clone geometry before disposing (for 3MF export as single solid mesh)
+  const exportGeometry = subdividedGeometry.clone();
 
   subdividedGeometry.dispose();
   if (baseGeometry !== combinedGeometry) {
@@ -414,6 +428,11 @@ export async function processMeshAsync(
     meshes,
     palette,
     colorStats,
+    exportData: {
+      geometry: exportGeometry,
+      faceColorIndices,
+      palette,
+    },
     debugInfo,
   };
 }

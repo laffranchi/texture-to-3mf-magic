@@ -12,6 +12,13 @@ export interface LoadedModel {
   name: string;
 }
 
+function countTriangles(geometry: THREE.BufferGeometry): number {
+  const index = geometry.getIndex();
+  const pos = geometry.getAttribute('position');
+  if (index) return index.count / 3;
+  return pos ? pos.count / 3 : 0;
+}
+
 export function useModelLoader() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,21 +33,17 @@ export function useModelLoader() {
         url,
         (gltf) => {
           URL.revokeObjectURL(url);
-          
+
           let geometry: THREE.BufferGeometry | null = null;
           let texture: THREE.Texture | null = null;
 
           gltf.scene.traverse((child) => {
             if (child instanceof THREE.Mesh) {
               if (!geometry) {
+                // Keep indexed geometry to avoid exploding memory on large models.
                 geometry = child.geometry.clone();
-                
-                // Ensure geometry has non-indexed format for face processing
-                if (geometry.index) {
-                  geometry = geometry.toNonIndexed();
-                }
               }
-              
+
               const material = child.material as THREE.MeshStandardMaterial;
               if (material.map && !texture) {
                 texture = material.map;
@@ -53,7 +56,7 @@ export function useModelLoader() {
             return;
           }
 
-          const triangleCount = geometry.getAttribute('position').count / 3;
+          const triangleCount = countTriangles(geometry);
 
           resolve({
             geometry,
@@ -83,7 +86,7 @@ export function useModelLoader() {
       if (mtlFile) {
         const mtlLoader = new MTLLoader();
         const mtlUrl = URL.createObjectURL(mtlFile);
-        
+
         try {
           materials = await new Promise<MTLLoader.MaterialCreator>((res, rej) => {
             mtlLoader.load(mtlUrl, res, undefined, rej);
@@ -101,20 +104,17 @@ export function useModelLoader() {
         objUrl,
         (obj) => {
           URL.revokeObjectURL(objUrl);
-          
+
           let geometry: THREE.BufferGeometry | null = null;
           let texture: THREE.Texture | null = null;
 
           obj.traverse((child) => {
             if (child instanceof THREE.Mesh) {
               if (!geometry) {
+                // Keep indexed geometry to avoid exploding memory on large models.
                 geometry = child.geometry.clone();
-                
-                if (geometry.index) {
-                  geometry = geometry.toNonIndexed();
-                }
               }
-              
+
               const material = child.material as THREE.MeshStandardMaterial;
               if (material?.map && !texture) {
                 texture = material.map;
@@ -136,7 +136,7 @@ export function useModelLoader() {
             return;
           }
 
-          const triangleCount = geometry.getAttribute('position').count / 3;
+          const triangleCount = countTriangles(geometry);
 
           resolve({
             geometry,
@@ -155,38 +155,39 @@ export function useModelLoader() {
     });
   }, []);
 
-  const loadModel = useCallback(async (files: FileList | File[]) => {
-    setLoading(true);
-    setError(null);
+  const loadModel = useCallback(
+    async (files: FileList | File[]) => {
+      setLoading(true);
+      setError(null);
 
-    try {
-      const fileArray = Array.from(files);
-      const glbFile = fileArray.find(f => f.name.toLowerCase().endsWith('.glb') || f.name.toLowerCase().endsWith('.gltf'));
-      const objFile = fileArray.find(f => f.name.toLowerCase().endsWith('.obj'));
-      const mtlFile = fileArray.find(f => f.name.toLowerCase().endsWith('.mtl'));
-      const textureFile = fileArray.find(f => 
-        f.name.toLowerCase().endsWith('.png') || 
-        f.name.toLowerCase().endsWith('.jpg') || 
-        f.name.toLowerCase().endsWith('.jpeg')
-      );
+      try {
+        const fileArray = Array.from(files);
+        const glbFile = fileArray.find((f) => f.name.toLowerCase().endsWith('.glb') || f.name.toLowerCase().endsWith('.gltf'));
+        const objFile = fileArray.find((f) => f.name.toLowerCase().endsWith('.obj'));
+        const mtlFile = fileArray.find((f) => f.name.toLowerCase().endsWith('.mtl'));
+        const textureFile = fileArray.find(
+          (f) => f.name.toLowerCase().endsWith('.png') || f.name.toLowerCase().endsWith('.jpg') || f.name.toLowerCase().endsWith('.jpeg')
+        );
 
-      let loadedModel: LoadedModel;
+        let loadedModel: LoadedModel;
 
-      if (glbFile) {
-        loadedModel = await loadGLB(glbFile);
-      } else if (objFile) {
-        loadedModel = await loadOBJ(objFile, mtlFile, textureFile);
-      } else {
-        throw new Error('Please upload a GLB/GLTF or OBJ file');
+        if (glbFile) {
+          loadedModel = await loadGLB(glbFile);
+        } else if (objFile) {
+          loadedModel = await loadOBJ(objFile, mtlFile, textureFile);
+        } else {
+          throw new Error('Please upload a GLB/GLTF or OBJ file');
+        }
+
+        setModel(loadedModel);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load model');
+      } finally {
+        setLoading(false);
       }
-
-      setModel(loadedModel);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load model');
-    } finally {
-      setLoading(false);
-    }
-  }, [loadGLB, loadOBJ]);
+    },
+    [loadGLB, loadOBJ]
+  );
 
   const clearModel = useCallback(() => {
     setModel(null);

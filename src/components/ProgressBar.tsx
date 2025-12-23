@@ -9,6 +9,7 @@ interface ProgressBarProps {
 }
 
 const STAGE_ICONS = {
+  simplifying: Scissors,
   subdividing: Scissors,
   sampling: Palette,
   quantizing: Palette,
@@ -17,6 +18,7 @@ const STAGE_ICONS = {
 };
 
 const STAGE_LABELS = {
+  simplifying: 'Simplificação',
   subdividing: 'Subdivisão',
   sampling: 'Amostragem',
   quantizing: 'Quantização',
@@ -26,21 +28,17 @@ const STAGE_LABELS = {
 
 export function ProgressBar({ progress, className }: ProgressBarProps) {
   const Icon = STAGE_ICONS[progress.stage];
-  
+
   return (
-    <div className={cn("space-y-3 p-4 bg-secondary/50 rounded-lg border border-border", className)}>
+    <div className={cn('space-y-3 p-4 bg-secondary/50 rounded-lg border border-border', className)}>
       <div className="flex items-center gap-3">
         <div className="flex items-center justify-center w-8 h-8 rounded-full bg-primary/20">
           <Icon className="w-4 h-4 text-primary animate-pulse" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-sm font-medium text-foreground">
-              {STAGE_LABELS[progress.stage]}
-            </span>
-            <span className="text-sm font-mono text-muted-foreground">
-              {Math.round(progress.progress)}%
-            </span>
+            <span className="text-sm font-medium text-foreground">{STAGE_LABELS[progress.stage]}</span>
+            <span className="text-sm font-mono text-muted-foreground">{Math.round(progress.progress)}%</span>
           </div>
           <Progress value={progress.progress} className="h-2" />
         </div>

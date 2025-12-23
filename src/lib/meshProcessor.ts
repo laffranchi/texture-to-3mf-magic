@@ -3,13 +3,23 @@ import { RGB, medianCut, findNearestColor } from './colorQuantization';
 import { simplifyGeometryAsync, getTriangleCount } from './meshSimplifier';
 import { MeshSource, extractColorsFromSources, combineSourcesToGeometry } from './colorExtractor';
 
-export type SubdivisionLevel = 'none' | 'low' | 'medium' | 'high';
+export type DetailLevel = 'auto' | 'low' | 'medium' | 'high';
+export type SubdivisionLevel = DetailLevel; // Alias for backward compatibility
 
-const SUBDIVISION_ITERATIONS: Record<SubdivisionLevel, number> = {
-  none: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
+// Target triangle counts for each detail level
+const DETAIL_TARGETS: Record<DetailLevel, number> = {
+  auto: 300000,   // Auto-decide based on original
+  low: 100000,    // ~100k triangles
+  medium: 300000, // ~300k triangles  
+  high: 500000,   // Max allowed (~500k)
+};
+
+// For subdivision (small models): iterations to increase detail
+const SUBDIVISION_ITERATIONS: Record<DetailLevel, number> = {
+  auto: 1,
+  low: 0,
+  medium: 1,
+  high: 2,
 };
 
 export interface ProcessedMesh {
@@ -305,12 +315,10 @@ async function buildMeshesByColorAsync(
 
 export async function processMeshAsync(
   sources: MeshSource[],
-  subdivisionLevel: SubdivisionLevel,
+  detailLevel: DetailLevel,
   numColors: number,
   onProgress: (progress: ProcessingProgress) => void
 ): Promise<ProcessingResult> {
-  const iterations = SUBDIVISION_ITERATIONS[subdivisionLevel];
-
   // Step 1: Extract colors from all sources BEFORE combining
   onProgress({
     stage: 'sampling',
@@ -330,22 +338,28 @@ export async function processMeshAsync(
   const combinedGeometry = combineSourcesToGeometry(sources);
   const originalTriangles = getTriangleCount(combinedGeometry);
 
-  // Step 3: Simplify if too large
+  // Step 3: Determine target triangle count based on detail level
+  const targetTriangles = DETAIL_TARGETS[detailLevel];
+  const needsSimplification = originalTriangles > targetTriangles;
+  const needsSubdivision = originalTriangles < 100000 && detailLevel !== 'low';
+
   let baseGeometry = combinedGeometry;
   let baseFaceColors = originalFaceColors;
 
-  if (originalTriangles > TRIANGLE_LIMITS.MAX) {
+  // Step 4: Simplify if model is too large
+  if (needsSimplification) {
+    const simplifyTarget = Math.min(targetTriangles, TRIANGLE_LIMITS.MAX);
+    
     onProgress({
       stage: 'simplifying',
       progress: 0,
-      message: `Simplificando malha grande (${originalTriangles.toLocaleString()} → ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos)...`,
+      message: `Simplificando malha (${originalTriangles.toLocaleString()} → ${simplifyTarget.toLocaleString()} triângulos)...`,
     });
 
-    const simplified = await simplifyGeometryAsync(combinedGeometry, TRIANGLE_LIMITS.MAX, 0.01);
+    const simplified = await simplifyGeometryAsync(combinedGeometry, simplifyTarget, 0.01);
     baseGeometry = simplified.geometry;
 
-    // For simplification, we need to resample colors (simplified geometry has fewer faces)
-    // For now, we'll just keep the colors aligned (this may need improvement)
+    // Resample colors for simplified geometry
     const simplifiedFaceCount = getTriangleCount(baseGeometry);
     if (simplifiedFaceCount < originalFaceColors.length) {
       const stride = Math.max(1, Math.floor(originalFaceColors.length / simplifiedFaceCount));
@@ -364,14 +378,21 @@ export async function processMeshAsync(
     await yieldToUI();
   }
 
-  // Step 4: Subdivide geometry
-  const subdividedGeometry = await subdivideGeometryAsync(baseGeometry, iterations, onProgress);
+  // Step 5: Subdivide geometry (only for small models that need more detail)
+  let subdividedGeometry = baseGeometry;
+  let subdividedFaceColors = baseFaceColors;
+  
+  if (needsSubdivision && !needsSimplification) {
+    const iterations = SUBDIVISION_ITERATIONS[detailLevel];
+    if (iterations > 0) {
+      subdividedGeometry = await subdivideGeometryAsync(baseGeometry, iterations, onProgress);
+      subdividedFaceColors = subdivideColors(baseFaceColors, iterations);
+    }
+  }
+  
   const processedTriangles = getTriangleCount(subdividedGeometry);
 
-  // Step 5: Subdivide colors to match
-  const subdividedFaceColors = subdivideColors(baseFaceColors, iterations);
-
-  console.log('[processMeshAsync] After subdivision:', processedTriangles, 'triangles,', subdividedFaceColors.length, 'colors');
+  console.log('[processMeshAsync] After processing:', processedTriangles, 'triangles,', subdividedFaceColors.length, 'colors');
 
   // Step 6: Quantize colors
   onProgress({
@@ -437,19 +458,44 @@ export async function processMeshAsync(
   };
 }
 
+/**
+ * Estimates the final triangle count based on the detail level.
+ * - Large models (>500k): simplifies down to target
+ * - Small models (<100k): may subdivide up to target
+ * - Medium models: slight adjustment or maintain
+ */
+export function getEstimatedTriangleCount(currentCount: number, level: DetailLevel): number {
+  const target = DETAIL_TARGETS[level];
+  
+  // Large models: simplify down to target (or less)
+  if (currentCount > TRIANGLE_LIMITS.MAX) {
+    return Math.min(currentCount, target);
+  }
+  
+  // Small models: may subdivide up
+  if (currentCount < 100000) {
+    const iterations = SUBDIVISION_ITERATIONS[level];
+    const subdivided = currentCount * Math.pow(4, iterations);
+    return Math.min(subdivided, TRIANGLE_LIMITS.MAX);
+  }
+  
+  // Medium models: target or maintain
+  return Math.min(currentCount, target);
+}
+
+// Backward compatibility alias
 export function getSubdivisionTriangleCount(currentCount: number, level: SubdivisionLevel): number {
-  const iterations = SUBDIVISION_ITERATIONS[level];
-  return currentCount * Math.pow(4, iterations);
+  return getEstimatedTriangleCount(currentCount, level);
 }
 
-export function getRecommendedSubdivision(triangleCount: number): SubdivisionLevel {
-  if (triangleCount * 64 > TRIANGLE_LIMITS.MAX) return 'none';
-  if (triangleCount * 16 > TRIANGLE_LIMITS.MAX) return 'low';
-  if (triangleCount * 4 > TRIANGLE_LIMITS.MAX) return 'medium';
-  return 'high';
+export function getRecommendedDetailLevel(triangleCount: number): DetailLevel {
+  if (triangleCount > TRIANGLE_LIMITS.MAX) return 'low'; // Needs simplification
+  if (triangleCount > 300000) return 'medium';
+  if (triangleCount < 50000) return 'high'; // Can subdivide
+  return 'auto';
 }
 
-export function estimateProcessingTime(triangleCount: number, level: SubdivisionLevel): number {
-  const finalCount = getSubdivisionTriangleCount(triangleCount, level);
+export function estimateProcessingTime(triangleCount: number, level: DetailLevel): number {
+  const finalCount = getEstimatedTriangleCount(triangleCount, level);
   return Math.max(1, Math.round(finalCount / 50000));
 }

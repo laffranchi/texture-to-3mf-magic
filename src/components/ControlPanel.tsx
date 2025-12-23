@@ -1,4 +1,4 @@
-import { SubdivisionLevel, getSubdivisionTriangleCount } from '@/lib/meshProcessor';
+import { DetailLevel, getEstimatedTriangleCount } from '@/lib/meshProcessor';
 import { RGB, rgbToHex } from '@/lib/colorQuantization';
 import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
@@ -7,26 +7,26 @@ import {
   Loader2, 
   Triangle, 
   Palette,
-  Grid3X3,
+  Settings2,
   Eye,
   EyeOff
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const SUBDIVISION_OPTIONS: { value: SubdivisionLevel; label: string; description: string }[] = [
-  { value: 'none', label: 'Nenhuma', description: 'Mantém original' },
-  { value: 'low', label: 'Low', description: '4x triângulos' },
-  { value: 'medium', label: 'Medium', description: '16x triângulos' },
-  { value: 'high', label: 'High', description: '64x triângulos' },
+const DETAIL_OPTIONS: { value: DetailLevel; label: string; description: string }[] = [
+  { value: 'auto', label: 'Auto', description: 'Otimizado automaticamente' },
+  { value: 'low', label: 'Baixo', description: '~100k triângulos' },
+  { value: 'medium', label: 'Médio', description: '~300k triângulos' },
+  { value: 'high', label: 'Alto', description: '~500k triângulos' },
 ];
 
 interface ControlPanelProps {
   // Model info
   originalTriangles: number;
   
-  // Subdivision
-  subdivisionLevel: SubdivisionLevel;
-  onSubdivisionChange: (level: SubdivisionLevel) => void;
+  // Detail level
+  detailLevel: DetailLevel;
+  onDetailLevelChange: (level: DetailLevel) => void;
   
   // Colors
   numColors: number;
@@ -55,8 +55,8 @@ interface ControlPanelProps {
 
 export function ControlPanel({
   originalTriangles,
-  subdivisionLevel,
-  onSubdivisionChange,
+  detailLevel,
+  onDetailLevelChange,
   numColors,
   onNumColorsChange,
   isProcessing,
@@ -70,7 +70,9 @@ export function ControlPanel({
   estimatedTriangles: propEstimatedTriangles,
   exceedsLimit = false,
 }: ControlPanelProps) {
-  const estimatedTriangles = propEstimatedTriangles ?? getSubdivisionTriangleCount(originalTriangles, subdivisionLevel);
+  const estimatedTriangles = propEstimatedTriangles ?? getEstimatedTriangleCount(originalTriangles, detailLevel);
+  const willSimplify = originalTriangles > estimatedTriangles;
+  const willSubdivide = originalTriangles < 100000 && detailLevel !== 'low';
 
   return (
     <div className="space-y-6 p-6 bg-card rounded-lg border border-border">
@@ -85,22 +87,22 @@ export function ControlPanel({
         </div>
       </div>
 
-      {/* Subdivision Level */}
+      {/* Detail Level */}
       <div>
         <div className="flex items-center gap-2 mb-3">
-          <Grid3X3 className="w-4 h-4 text-primary" />
-          <h3 className="text-sm font-medium text-foreground">Subdivisão</h3>
+          <Settings2 className="w-4 h-4 text-primary" />
+          <h3 className="text-sm font-medium text-foreground">Nível de Detalhe</h3>
         </div>
         <div className="grid grid-cols-4 gap-2">
-          {SUBDIVISION_OPTIONS.map((option) => (
+          {DETAIL_OPTIONS.map((option) => (
             <button
               key={option.value}
-              onClick={() => onSubdivisionChange(option.value)}
+              onClick={() => onDetailLevelChange(option.value)}
               disabled={isProcessing}
               className={cn(
                 "px-3 py-2 rounded-md text-sm transition-all",
                 "border border-border hover:border-primary/50",
-                subdivisionLevel === option.value
+                detailLevel === option.value
                   ? "bg-primary text-primary-foreground border-primary"
                   : "bg-secondary text-secondary-foreground"
               )}
@@ -113,7 +115,10 @@ export function ControlPanel({
           "mt-2 text-xs",
           exceedsLimit ? "text-destructive" : "text-muted-foreground"
         )}>
-          Estimativa: <span className={cn("font-mono", exceedsLimit ? "text-destructive" : "text-foreground")}>
+          {willSimplify && <span className="text-amber-500">Simplificará: </span>}
+          {willSubdivide && <span className="text-green-500">Subdividirá: </span>}
+          {!willSimplify && !willSubdivide && "Estimativa: "}
+          <span className={cn("font-mono", exceedsLimit ? "text-destructive" : "text-foreground")}>
             {estimatedTriangles.toLocaleString()}
           </span> triângulos
           {exceedsLimit && " (limite excedido!)"}

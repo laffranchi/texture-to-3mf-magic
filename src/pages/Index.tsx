@@ -7,10 +7,10 @@ import { ProgressBar } from '@/components/ProgressBar';
 import { useModelLoader } from '@/hooks/useModelLoader';
 import { 
   processMeshAsync, 
-  SubdivisionLevel, 
+  DetailLevel, 
   ProcessingResult, 
   ProcessingProgress,
-  getSubdivisionTriangleCount,
+  getEstimatedTriangleCount,
   TRIANGLE_LIMITS,
   estimateProcessingTime
 } from '@/lib/meshProcessor';
@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/button';
 export default function Index() {
   const { model, loading, error, loadModel, clearModel } = useModelLoader();
   
-  const [subdivisionLevel, setSubdivisionLevel] = useState<SubdivisionLevel>('none');
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>('auto');
   const [numColors, setNumColors] = useState(4);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
@@ -30,28 +30,27 @@ export default function Index() {
   const [showProcessed, setShowProcessed] = useState(false);
 
   // Calculate estimated triangles and warnings
-  const baseTriangles = model ? Math.min(model.triangleCount, TRIANGLE_LIMITS.MAX) : 0;
-  const estimatedTriangles = model ? getSubdivisionTriangleCount(baseTriangles, subdivisionLevel) : 0;
+  const estimatedTriangles = model ? getEstimatedTriangleCount(model.triangleCount, detailLevel) : 0;
   const showWarning = estimatedTriangles > TRIANGLE_LIMITS.WARNING;
   const exceedsLimit = estimatedTriangles > TRIANGLE_LIMITS.MAX;
-  const estimatedTime = model ? estimateProcessingTime(baseTriangles, subdivisionLevel) : 0;
+  const estimatedTime = model ? estimateProcessingTime(model.triangleCount, detailLevel) : 0;
 
   const handleProcess = useCallback(async () => {
     if (!model) return;
 
     if (exceedsLimit) {
-      toast.error(`Limite excedido! Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos. Reduza a subdivisão.`);
+      toast.error(`Limite excedido! Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos.`);
       return;
     }
 
     setIsProcessing(true);
     setShowProcessed(false);
-    setProcessingProgress({ stage: 'subdividing', progress: 0, message: 'Iniciando...' });
+    setProcessingProgress({ stage: 'simplifying', progress: 0, message: 'Iniciando...' });
     
     try {
       const result = await processMeshAsync(
         model.sources,
-        subdivisionLevel,
+        detailLevel,
         numColors,
         setProcessingProgress
       );
@@ -66,7 +65,7 @@ export default function Index() {
       setIsProcessing(false);
       setProcessingProgress(null);
     }
-  }, [model, subdivisionLevel, numColors, exceedsLimit]);
+  }, [model, detailLevel, numColors, exceedsLimit]);
 
   const handleExport = useCallback(async () => {
     if (!processingResult || !model) return;
@@ -251,8 +250,8 @@ export default function Index() {
             <div className="lg:sticky lg:top-4 lg:self-start">
               <ControlPanel
                 originalTriangles={model.triangleCount}
-                subdivisionLevel={subdivisionLevel}
-                onSubdivisionChange={setSubdivisionLevel}
+                detailLevel={detailLevel}
+                onDetailLevelChange={setDetailLevel}
                 numColors={numColors}
                 onNumColorsChange={setNumColors}
                 isProcessing={isProcessing}

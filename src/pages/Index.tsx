@@ -16,7 +16,7 @@ import {
 } from '@/lib/meshProcessor';
 import { export3MF, downloadBlob } from '@/lib/export3MF';
 import { toast } from 'sonner';
-import { AlertCircle, ArrowLeft, AlertTriangle } from 'lucide-react';
+import { AlertCircle, ArrowLeft, AlertTriangle, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 export default function Index() {
@@ -50,8 +50,7 @@ export default function Index() {
     
     try {
       const result = await processMeshAsync(
-        model.geometry,
-        model.texture,
+        model.sources,
         subdivisionLevel,
         numColors,
         setProcessingProgress
@@ -174,6 +173,21 @@ export default function Index() {
                 />
               </div>
 
+              {/* Model Debug Info */}
+              {model.debugInfo && (
+                <div className="p-3 bg-muted/50 border border-border rounded-lg flex items-start gap-3">
+                  <Info className="w-4 h-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+                  <div className="text-xs text-muted-foreground space-y-0.5">
+                    <p>
+                      <span className="font-medium">Meshes:</span> {model.debugInfo.meshCount} | 
+                      <span className="font-medium ml-2">Materiais:</span> {model.debugInfo.materialCount} | 
+                      <span className="font-medium ml-2">Texturas:</span> {model.debugInfo.texturedMaterials}
+                      {model.debugInfo.hasVertexColors && <span className="ml-2 text-primary">• Vertex Colors</span>}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Processing Progress */}
               {isProcessing && processingProgress && (
                 <ProgressBar progress={processingProgress} />
@@ -194,6 +208,21 @@ export default function Index() {
                       }
                     </p>
                   </div>
+                </div>
+              )}
+
+              {/* Processing Debug Info */}
+              {showProcessed && processingResult?.debugInfo && (
+                <div className="p-3 bg-primary/10 border border-primary/20 rounded-lg">
+                  <p className="text-xs text-primary/80">
+                    <span className="font-medium">Cores extraídas:</span>{' '}
+                    {processingResult.debugInfo.facesWithTexture > 0 && 
+                      `${processingResult.debugInfo.facesWithTexture} faces c/ textura`}
+                    {processingResult.debugInfo.facesWithVertexColor > 0 && 
+                      ` • ${processingResult.debugInfo.facesWithVertexColor} c/ vertex color`}
+                    {processingResult.debugInfo.facesWithMaterialColor > 0 && 
+                      ` • ${processingResult.debugInfo.facesWithMaterialColor} c/ cor do material`}
+                  </p>
                 </div>
               )}
 

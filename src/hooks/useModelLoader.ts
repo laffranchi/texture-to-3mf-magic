@@ -3,13 +3,19 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
+import { MeshSource } from '@/lib/colorExtractor';
 
 export interface LoadedModel {
-  geometry: THREE.BufferGeometry;
-  texture: THREE.Texture | null;
+  sources: MeshSource[];
   originalObject: THREE.Object3D;
   triangleCount: number;
   name: string;
+  debugInfo: {
+    meshCount: number;
+    materialCount: number;
+    texturedMaterials: number;
+    hasVertexColors: boolean;
+  };
 }
 
 function countTriangles(geometry: THREE.BufferGeometry): number {
@@ -17,6 +23,54 @@ function countTriangles(geometry: THREE.BufferGeometry): number {
   const pos = geometry.getAttribute('position');
   if (index) return index.count / 3;
   return pos ? pos.count / 3 : 0;
+}
+
+// Extract all mesh sources from a scene
+function extractMeshSources(scene: THREE.Object3D): MeshSource[] {
+  const sources: MeshSource[] = [];
+
+  scene.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      const mesh = child as THREE.Mesh;
+      const geometry = mesh.geometry;
+      
+      if (!geometry.getAttribute('position')) return;
+
+      // Handle materials (can be single or array)
+      let materials: THREE.Material[];
+      if (Array.isArray(mesh.material)) {
+        materials = mesh.material;
+      } else {
+        materials = [mesh.material];
+      }
+
+      // Get groups from geometry (for multi-material meshes)
+      const rawGroups = geometry.groups;
+      let groups: { start: number; count: number; materialIndex: number }[];
+      if (!rawGroups || rawGroups.length === 0) {
+        // Create a single group covering the entire geometry
+        const posAttr = geometry.getAttribute('position');
+        const indexAttr = geometry.getIndex();
+        const count = indexAttr ? indexAttr.count : posAttr.count;
+        groups = [{ start: 0, count, materialIndex: 0 }];
+      } else {
+        groups = rawGroups.map(g => ({ start: g.start, count: g.count, materialIndex: g.materialIndex ?? 0 }));
+      }
+
+      // Update world matrix
+      mesh.updateMatrixWorld(true);
+
+      sources.push({
+        geometry: geometry.clone(),
+        materials: materials.map(m => m.clone()),
+        groups: groups.map(g => ({ ...g })),
+        matrixWorld: mesh.matrixWorld.clone(),
+        name: mesh.name || `mesh_${sources.length}`,
+      });
+    }
+  });
+
+  return sources;
 }
 
 export function useModelLoader() {
@@ -34,36 +88,46 @@ export function useModelLoader() {
         (gltf) => {
           URL.revokeObjectURL(url);
 
-          let geometry: THREE.BufferGeometry | null = null;
-          let texture: THREE.Texture | null = null;
-
-          gltf.scene.traverse((child) => {
-            if (child instanceof THREE.Mesh) {
-              if (!geometry) {
-                // Keep indexed geometry to avoid exploding memory on large models.
-                geometry = child.geometry.clone();
-              }
-
-              const material = child.material as THREE.MeshStandardMaterial;
-              if (material.map && !texture) {
-                texture = material.map;
-              }
-            }
-          });
-
-          if (!geometry) {
+          const sources = extractMeshSources(gltf.scene);
+          
+          if (sources.length === 0) {
             reject(new Error('No mesh found in GLB file'));
             return;
           }
 
-          const triangleCount = countTriangles(geometry);
+          // Calculate total triangles
+          let totalTriangles = 0;
+          let materialCount = 0;
+          let texturedMaterials = 0;
+          let hasVertexColors = false;
+
+          for (const source of sources) {
+            totalTriangles += countTriangles(source.geometry);
+            materialCount += source.materials.length;
+            
+            for (const mat of source.materials) {
+              const stdMat = mat as THREE.MeshStandardMaterial;
+              if (stdMat.map) texturedMaterials++;
+            }
+            
+            if (source.geometry.getAttribute('color')) {
+              hasVertexColors = true;
+            }
+          }
+
+          console.log(`[useModelLoader] Loaded GLB: ${sources.length} meshes, ${totalTriangles} triangles, ${materialCount} materials, ${texturedMaterials} textured`);
 
           resolve({
-            geometry,
-            texture,
+            sources,
             originalObject: gltf.scene,
-            triangleCount,
+            triangleCount: totalTriangles,
             name: file.name.replace(/\.[^/.]+$/, ''),
+            debugInfo: {
+              meshCount: sources.length,
+              materialCount,
+              texturedMaterials,
+              hasVertexColors,
+            },
           });
         },
         undefined,
@@ -102,48 +166,76 @@ export function useModelLoader() {
 
       objLoader.load(
         objUrl,
-        (obj) => {
+        async (obj) => {
           URL.revokeObjectURL(objUrl);
 
-          let geometry: THREE.BufferGeometry | null = null;
-          let texture: THREE.Texture | null = null;
-
-          obj.traverse((child) => {
-            if (child instanceof THREE.Mesh) {
-              if (!geometry) {
-                // Keep indexed geometry to avoid exploding memory on large models.
-                geometry = child.geometry.clone();
-              }
-
-              const material = child.material as THREE.MeshStandardMaterial;
-              if (material?.map && !texture) {
-                texture = material.map;
-              }
-            }
-          });
-
           // Load separate texture if provided
-          if (textureFile && !texture) {
+          if (textureFile) {
             const textureLoader = new THREE.TextureLoader();
             const textureUrl = URL.createObjectURL(textureFile);
-            texture = textureLoader.load(textureUrl, () => {
+            
+            try {
+              const texture = await new Promise<THREE.Texture>((res, rej) => {
+                textureLoader.load(textureUrl, res, undefined, rej);
+              });
+              
+              // Apply texture to all materials
+              obj.traverse((child) => {
+                if (child instanceof THREE.Mesh) {
+                  const material = child.material as THREE.MeshStandardMaterial;
+                  if (material) {
+                    material.map = texture;
+                    material.needsUpdate = true;
+                  }
+                }
+              });
+            } catch (e) {
+              console.warn('Failed to load texture:', e);
+            } finally {
               URL.revokeObjectURL(textureUrl);
-            });
+            }
           }
 
-          if (!geometry) {
+          const sources = extractMeshSources(obj);
+
+          if (sources.length === 0) {
             reject(new Error('No mesh found in OBJ file'));
             return;
           }
 
-          const triangleCount = countTriangles(geometry);
+          // Calculate totals
+          let totalTriangles = 0;
+          let materialCount = 0;
+          let texturedMaterials = 0;
+          let hasVertexColors = false;
+
+          for (const source of sources) {
+            totalTriangles += countTriangles(source.geometry);
+            materialCount += source.materials.length;
+            
+            for (const mat of source.materials) {
+              const stdMat = mat as THREE.MeshStandardMaterial;
+              if (stdMat.map) texturedMaterials++;
+            }
+            
+            if (source.geometry.getAttribute('color')) {
+              hasVertexColors = true;
+            }
+          }
+
+          console.log(`[useModelLoader] Loaded OBJ: ${sources.length} meshes, ${totalTriangles} triangles`);
 
           resolve({
-            geometry,
-            texture,
+            sources,
             originalObject: obj,
-            triangleCount,
+            triangleCount: totalTriangles,
             name: objFile.name.replace(/\.[^/.]+$/, ''),
+            debugInfo: {
+              meshCount: sources.length,
+              materialCount,
+              texturedMaterials,
+              hasVertexColors,
+            },
           });
         },
         undefined,

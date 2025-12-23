@@ -45,35 +45,105 @@ class TextureSampler {
   private imageData: ImageData | null = null;
   private width: number = 0;
   private height: number = 0;
+  private hasTexture: boolean = false;
 
-  initialize(texture: THREE.Texture | null): boolean {
-    if (!texture?.image) return false;
+  async initialize(texture: THREE.Texture | null): Promise<boolean> {
+    if (!texture?.image) {
+      console.warn('[TextureSampler] No texture or texture.image provided');
+      return false;
+    }
 
-    const image = texture.image as HTMLImageElement | HTMLCanvasElement;
+    const image = texture.image;
+    
+    // Support HTMLImageElement, HTMLCanvasElement, and ImageBitmap
+    let sourceWidth = 0;
+    let sourceHeight = 0;
+    let drawSource: CanvasImageSource | null = null;
+
+    if (image instanceof HTMLImageElement) {
+      // Wait for image to load if not ready
+      if (!image.complete || image.naturalWidth === 0) {
+        console.log('[TextureSampler] Waiting for HTMLImageElement to load...');
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error('Image failed to load'));
+          // If already loaded, resolve immediately
+          if (image.complete && image.naturalWidth > 0) resolve();
+        });
+      }
+      sourceWidth = image.naturalWidth || image.width;
+      sourceHeight = image.naturalHeight || image.height;
+      drawSource = image;
+      console.log(`[TextureSampler] HTMLImageElement: ${sourceWidth}x${sourceHeight}`);
+    } else if (image instanceof HTMLCanvasElement) {
+      sourceWidth = image.width;
+      sourceHeight = image.height;
+      drawSource = image;
+      console.log(`[TextureSampler] HTMLCanvasElement: ${sourceWidth}x${sourceHeight}`);
+    } else if (typeof ImageBitmap !== 'undefined' && image instanceof ImageBitmap) {
+      sourceWidth = image.width;
+      sourceHeight = image.height;
+      drawSource = image;
+      console.log(`[TextureSampler] ImageBitmap: ${sourceWidth}x${sourceHeight}`);
+    } else if (image.width && image.height) {
+      // Fallback for other image-like objects
+      sourceWidth = image.width;
+      sourceHeight = image.height;
+      drawSource = image as CanvasImageSource;
+      console.log(`[TextureSampler] Unknown image type with dimensions: ${sourceWidth}x${sourceHeight}`);
+    }
+
+    if (!drawSource || sourceWidth === 0 || sourceHeight === 0) {
+      console.warn('[TextureSampler] Invalid image source or zero dimensions');
+      return false;
+    }
+
+    this.width = sourceWidth;
+    this.height = sourceHeight;
+
     const canvas = document.createElement('canvas');
-    this.width = image.width || 256;
-    this.height = image.height || 256;
     canvas.width = this.width;
     canvas.height = this.height;
 
     const ctx = canvas.getContext('2d');
-    if (!ctx) return false;
+    if (!ctx) {
+      console.warn('[TextureSampler] Could not get canvas 2d context');
+      return false;
+    }
 
-    ctx.drawImage(image, 0, 0);
-    this.imageData = ctx.getImageData(0, 0, this.width, this.height);
-    return true;
+    try {
+      ctx.drawImage(drawSource, 0, 0, this.width, this.height);
+      this.imageData = ctx.getImageData(0, 0, this.width, this.height);
+      this.hasTexture = true;
+      console.log(`[TextureSampler] Successfully initialized with ${this.width}x${this.height} texture`);
+      return true;
+    } catch (e) {
+      console.error('[TextureSampler] Error drawing image to canvas:', e);
+      return false;
+    }
   }
 
   sample(u: number, v: number): RGB {
-    if (!this.imageData) {
-      return { r: 200, g: 200, b: 200 };
+    if (!this.imageData || !this.hasTexture) {
+      // Fallback: magenta to make it obvious there's no texture
+      return { r: 255, g: 0, b: 255 };
     }
 
-    // Wrap UV coordinates
-    const x = Math.floor(((u % 1) + 1) % 1 * this.width);
-    const y = Math.floor((1 - ((v % 1) + 1) % 1) * this.height);
+    // Wrap UV coordinates properly and clamp to valid range
+    const wrappedU = ((u % 1) + 1) % 1;
+    const wrappedV = ((v % 1) + 1) % 1;
+    
+    // Convert to pixel coordinates, clamping to valid range
+    const x = Math.min(this.width - 1, Math.max(0, Math.floor(wrappedU * this.width)));
+    const y = Math.min(this.height - 1, Math.max(0, Math.floor((1 - wrappedV) * this.height)));
 
     const idx = (y * this.width + x) * 4;
+    
+    // Additional bounds check
+    if (idx < 0 || idx + 2 >= this.imageData.data.length) {
+      return { r: 255, g: 0, b: 255 };
+    }
+
     return {
       r: this.imageData.data[idx],
       g: this.imageData.data[idx + 1],
@@ -83,6 +153,7 @@ class TextureSampler {
 
   dispose() {
     this.imageData = null;
+    this.hasTexture = false;
   }
 }
 
@@ -382,7 +453,11 @@ export async function processMeshAsync(
   const iterations = SUBDIVISION_ITERATIONS[subdivisionLevel];
 
   const sampler = new TextureSampler();
-  sampler.initialize(texture);
+  const textureLoaded = await sampler.initialize(texture);
+  
+  if (!textureLoaded) {
+    console.warn('[processMeshAsync] Texture not loaded - colors will use fallback');
+  }
 
   const originalTriangles = getTriangleCount(geometry);
 

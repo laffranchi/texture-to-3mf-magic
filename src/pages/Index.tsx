@@ -74,7 +74,7 @@ export default function Index() {
     
     // Warn about high triangle count for OrcaSlicer
     if (triCount > MAX_TRIANGLES_LIMIT) {
-      toast.error(`Modelo muito grande (${triCount.toLocaleString()} triângulos). OrcaSlicer pode não importar corretamente. Reduza a subdivisão.`);
+      toast.error(`Modelo muito grande (${triCount.toLocaleString()} triângulos). OrcaSlicer pode não importar corretamente. Use um nível de detalhe mais baixo.`);
       return;
     }
     
@@ -143,7 +143,7 @@ export default function Index() {
                 <div className="text-2xl mb-2">🎨</div>
                 <h3 className="font-medium text-foreground">2. Configure</h3>
                 <p className="text-sm text-muted-foreground">
-                  Escolha subdivisão e quantidade de cores
+                  Escolha nível de detalhe e quantidade de cores
                 </p>
               </div>
               <div className="p-4 bg-card rounded-lg border border-border">
@@ -214,7 +214,7 @@ export default function Index() {
                     </p>
                     <p className="text-xs text-warning/80">
                       {exceedsLimit 
-                        ? `Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()}. Reduza a subdivisão.`
+                        ? `Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()}. Reduza o nível de detalhe.`
                         : `Estimativa: ${estimatedTriangles.toLocaleString()} triângulos (~${estimatedTime}s)`
                       }
                     </p>

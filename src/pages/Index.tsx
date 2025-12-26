@@ -4,6 +4,7 @@ import { FileUpload } from '@/components/FileUpload';
 import { ModelViewer } from '@/components/ModelViewer';
 import { ControlPanel } from '@/components/ControlPanel';
 import { ProgressBar } from '@/components/ProgressBar';
+import { Inspector3MF } from '@/components/Inspector3MF';
 import { useModelLoader } from '@/hooks/useModelLoader';
 import { 
   processMeshAsync, 
@@ -14,9 +15,10 @@ import {
   TRIANGLE_LIMITS,
   estimateProcessingTime
 } from '@/lib/meshProcessor';
-import { export3MF, downloadBlob, MAX_TRIANGLES_WARNING, MAX_TRIANGLES_LIMIT } from '@/lib/export3MF';
+import { export3MF, downloadBlob, MAX_TRIANGLES_WARNING, MAX_TRIANGLES_LIMIT, ExportReport } from '@/lib/export3MF';
+import { ExportMode } from '@/lib/exportModes';
 import { toast } from 'sonner';
-import { AlertCircle, ArrowLeft, AlertTriangle, Info } from 'lucide-react';
+import { AlertCircle, ArrowLeft, AlertTriangle, Info, FileSearch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 export default function Index() {
@@ -28,6 +30,9 @@ export default function Index() {
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [showProcessed, setShowProcessed] = useState(false);
+  const [exportMode, setExportMode] = useState<ExportMode>('multi_volume');
+  const [showInspector, setShowInspector] = useState(false);
+  const [lastExportReport, setLastExportReport] = useState<ExportReport | null>(null);
 
   // Calculate estimated triangles and warnings
   const estimatedTriangles = model ? getEstimatedTriangleCount(model.triangleCount, detailLevel) : 0;
@@ -83,14 +88,20 @@ export default function Index() {
     }
 
     try {
-      const blob = await export3MF(processingResult.exportData, model.name);
+      const { blob, report } = await export3MF(processingResult.exportData, model.name, exportMode);
+      setLastExportReport(report);
       downloadBlob(blob, `${model.name}_multi-material.3mf`);
-      toast.success('3MF exportado para OrcaSlicer!');
+      
+      toast.success(`3MF exportado (modo: ${exportMode})`, {
+        description: `${report.totalTriangles.toLocaleString()} triângulos, ${report.palette.length} cores`,
+      });
+      
+      console.log('[Export Report]', report);
     } catch (err) {
       toast.error('Erro ao exportar 3MF');
       console.error(err);
     }
-  }, [processingResult, model]);
+  }, [processingResult, model, exportMode]);
 
   const handleReset = useCallback(() => {
     clearModel();
@@ -101,6 +112,9 @@ export default function Index() {
   return (
     <div className="min-h-screen bg-background dark">
       <Header />
+      
+      {/* Inspector Modal */}
+      {showInspector && <Inspector3MF onClose={() => setShowInspector(false)} />}
       
       <main className="container mx-auto px-4 py-8">
         {!model ? (
@@ -153,6 +167,18 @@ export default function Index() {
                   Baixe 3MF com meshes separadas por cor
                 </p>
               </div>
+            </div>
+            
+            {/* Inspector Button */}
+            <div className="mt-8 text-center">
+              <Button 
+                variant="outline" 
+                onClick={() => setShowInspector(true)}
+                className="gap-2"
+              >
+                <FileSearch className="w-4 h-4" />
+                Analisar arquivo 3MF existente
+              </Button>
             </div>
           </div>
         ) : (
@@ -247,7 +273,7 @@ export default function Index() {
             </div>
 
             {/* Control Panel */}
-            <div className="lg:sticky lg:top-4 lg:self-start">
+            <div className="lg:sticky lg:top-4 lg:self-start space-y-4">
               <ControlPanel
                 originalTriangles={model.triangleCount}
                 detailLevel={detailLevel}
@@ -264,7 +290,31 @@ export default function Index() {
                 processedTriangles={processingResult?.processedTriangles}
                 estimatedTriangles={estimatedTriangles}
                 exceedsLimit={exceedsLimit}
+                exportMode={exportMode}
+                onExportModeChange={setExportMode}
               />
+              
+              {/* Inspector Button */}
+              <Button 
+                variant="outline" 
+                onClick={() => setShowInspector(true)}
+                className="w-full gap-2"
+              >
+                <FileSearch className="w-4 h-4" />
+                Inspector 3MF
+              </Button>
+              
+              {/* Last Export Report */}
+              {lastExportReport && (
+                <div className="p-3 bg-secondary/50 rounded-lg border border-border">
+                  <p className="text-xs text-muted-foreground mb-2">Último Export:</p>
+                  <div className="text-xs font-mono text-foreground space-y-1">
+                    <p>Modo: {lastExportReport.mode}</p>
+                    <p>Triângulos: {lastExportReport.totalTriangles.toLocaleString()}</p>
+                    <p>Cores únicas: {lastExportReport.colorDistribution.length}</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

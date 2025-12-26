@@ -41,11 +41,31 @@ interface ValidationResult {
   valid: boolean;
   errors: string[];
   warnings: string[];
+  xmlParseResults: { file: string; valid: boolean; error?: string }[];
+  geometryStats: { vertices: number; triangles: number; paintColorCount: number };
+}
+
+/**
+ * Validate XML is well-formed using DOMParser.
+ * Returns parse result with any errors.
+ */
+function validateXmlWellFormed(xml: string, filename: string): { valid: boolean; error?: string } {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, 'application/xml');
+    const parseError = doc.querySelector('parsererror');
+    if (parseError) {
+      return { valid: false, error: parseError.textContent?.slice(0, 200) || 'XML parse error' };
+    }
+    return { valid: true };
+  } catch (e) {
+    return { valid: false, error: String(e).slice(0, 200) };
+  }
 }
 
 /**
  * Validate the 3MF structure before generating the final blob.
- * Ensures all paths and references are correct.
+ * Ensures all paths, references, and XML validity are correct.
  */
 async function validate3MFStructure(
   zip: JSZip,
@@ -53,6 +73,8 @@ async function validate3MFStructure(
 ): Promise<ValidationResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
+  const xmlParseResults: { file: string; valid: boolean; error?: string }[] = [];
+  let geometryStats = { vertices: 0, triangles: 0, paintColorCount: 0 };
 
   const objectPath = `3D/Objects/${baseName}.model`;
   const relsPath = '3D/_rels/3dmodel.model.rels';
@@ -73,38 +95,109 @@ async function validate3MFStructure(
     errors.push(`ERRO: ${wrapperPath} não existe no ZIP`);
   }
 
-  // Check 4: .rels Target matches object path
+  // Check 4: Parse and validate .rels XML
   const relsFile = zip.file(relsPath);
   if (relsFile) {
     const relsContent = await relsFile.async('string');
-    if (!relsContent.includes(`/3D/Objects/${baseName}.model`)) {
+    const parseResult = validateXmlWellFormed(relsContent, relsPath);
+    xmlParseResults.push({ file: relsPath, ...parseResult });
+    
+    if (!parseResult.valid) {
+      errors.push(`ERRO: ${relsPath} XML inválido: ${parseResult.error}`);
+    } else if (!relsContent.includes(`/3D/Objects/${baseName}.model`)) {
       errors.push(`ERRO: .rels Target não aponta para /3D/Objects/${baseName}.model`);
     }
   }
 
-  // Check 5: Wrapper p:path matches object path
+  // Check 5: Parse and validate wrapper XML
   const wrapperFile = zip.file(wrapperPath);
   if (wrapperFile) {
     const wrapperContent = await wrapperFile.async('string');
-    if (!wrapperContent.includes(`p:path="/3D/Objects/${baseName}.model"`)) {
-      errors.push(`ERRO: Wrapper p:path não aponta para /3D/Objects/${baseName}.model`);
+    const parseResult = validateXmlWellFormed(wrapperContent, wrapperPath);
+    xmlParseResults.push({ file: wrapperPath, ...parseResult });
+    
+    if (!parseResult.valid) {
+      errors.push(`ERRO: ${wrapperPath} XML inválido: ${parseResult.error}`);
+    } else {
+      // Check p:path is in <item>, not <component>
+      if (!wrapperContent.includes(`p:path="/3D/Objects/${baseName}.model"`)) {
+        errors.push(`ERRO: Wrapper <item> não contém p:path="/3D/Objects/${baseName}.model"`);
+      }
+      if (!wrapperContent.includes('requiredextensions="p"')) {
+        warnings.push(`AVISO: Wrapper não tem requiredextensions="p"`);
+      }
     }
   }
 
-  // Check 6: Object model contains paint_color
+  // Check 6: Parse and validate object model XML + geometry
   const objectFile = zip.file(objectPath);
   if (objectFile) {
     const objectContent = await objectFile.async('string');
-    const paintColorMatches = objectContent.match(/paint_color="/g);
-    const paintColorCount = paintColorMatches ? paintColorMatches.length : 0;
-    if (paintColorCount === 0) {
-      errors.push(`ERRO: ${objectPath} não contém nenhum paint_color`);
+    const parseResult = validateXmlWellFormed(objectContent, objectPath);
+    xmlParseResults.push({ file: objectPath, ...parseResult });
+    
+    if (!parseResult.valid) {
+      errors.push(`ERRO: ${objectPath} XML inválido: ${parseResult.error}`);
     } else {
-      console.log(`[validate3MF] Found ${paintColorCount} triangles with paint_color`);
+      // Parse and count geometry
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(objectContent, 'application/xml');
+      
+      const mesh = doc.querySelector('mesh');
+      if (!mesh) {
+        errors.push(`ERRO: ${objectPath} não contém <mesh>`);
+      }
+      
+      const vertices = doc.querySelectorAll('vertex');
+      const triangles = doc.querySelectorAll('triangle');
+      
+      geometryStats.vertices = vertices.length;
+      geometryStats.triangles = triangles.length;
+      
+      if (triangles.length === 0) {
+        errors.push(`ERRO: ${objectPath} não contém triângulos`);
+      }
+      
+      // Count paint_color attributes
+      let paintColorCount = 0;
+      triangles.forEach(tri => {
+        if (tri.hasAttribute('paint_color')) {
+          paintColorCount++;
+        }
+      });
+      geometryStats.paintColorCount = paintColorCount;
+      
+      if (paintColorCount === 0) {
+        errors.push(`ERRO: ${objectPath} não contém nenhum paint_color`);
+      } else {
+        console.log(`[validate3MF] Found ${paintColorCount} triangles with paint_color`);
+      }
     }
   }
 
-  return { valid: errors.length === 0, errors, warnings };
+  // Check Content_Types
+  const contentTypesFile = zip.file('[Content_Types].xml');
+  if (contentTypesFile) {
+    const content = await contentTypesFile.async('string');
+    const parseResult = validateXmlWellFormed(content, '[Content_Types].xml');
+    xmlParseResults.push({ file: '[Content_Types].xml', ...parseResult });
+    if (!parseResult.valid) {
+      errors.push(`ERRO: [Content_Types].xml inválido: ${parseResult.error}`);
+    }
+  }
+
+  // Check root .rels
+  const rootRelsFile = zip.file('_rels/.rels');
+  if (rootRelsFile) {
+    const content = await rootRelsFile.async('string');
+    const parseResult = validateXmlWellFormed(content, '_rels/.rels');
+    xmlParseResults.push({ file: '_rels/.rels', ...parseResult });
+    if (!parseResult.valid) {
+      errors.push(`ERRO: _rels/.rels inválido: ${parseResult.error}`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings, xmlParseResults, geometryStats };
 }
 
 /**
@@ -279,20 +372,17 @@ export async function export3MF(
  * This file references the actual geometry in Objects/
  */
 function buildWrapperModel(baseName: string): string {
+  // CRITICAL: Use p:path directly in <item>, not in <component>
+  // This is the correct OrcaSlicer/3MF Production Extension format
   return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US"
        xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
+       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+       requiredextensions="p">
   <metadata name="Application">3D Texture Converter</metadata>
-  <resources>
-    <object id="1" type="model">
-      <components>
-        <component p:path="/3D/Objects/${baseName}.model" objectid="1"/>
-      </components>
-    </object>
-  </resources>
+  <resources/>
   <build>
-    <item objectid="1" printable="1"/>
+    <item objectid="1" p:path="/3D/Objects/${baseName}.model" printable="1"/>
   </build>
 </model>`;
 }
@@ -562,17 +652,23 @@ function buildExpandedDiagnosticReport(report: ExportReport, baseName: string): 
     `Date: ${new Date().toISOString()}`,
     `Export Mode: ${report.mode}`,
     '',
-    '--- File Structure ---',
+    '--- ZIP File Tree ---',
     report.fileStructure,
+    '',
+    '--- XML Parse Validation ---',
+    ...(report.validation.xmlParseResults?.map(r => 
+      `  ${r.file}: ${r.valid ? 'OK ✓' : `ERRO ✗ - ${r.error}`}`
+    ) || ['  (no parse results)']),
     '',
     '--- Path Verification ---',
     `  .rels Target: ${report.pathVerification.relsTarget} ${report.pathVerification.objectFileExists ? '✓' : '✗'}`,
     `  Wrapper p:path: ${report.pathVerification.wrapperPath} ${report.pathVerification.objectFileExists ? '✓' : '✗'}`,
     `  Object file exists: ${report.pathVerification.objectFileExists ? 'YES ✓' : 'NO ✗'}`,
     '',
-    '--- Geometry ---',
-    `  Total Triangles: ${report.totalTriangles.toLocaleString()}`,
-    `  Total Vertices: ${report.totalVertices.toLocaleString()}`,
+    '--- Geometry Stats (from XML parse) ---',
+    `  Vertices: ${report.validation.geometryStats?.vertices?.toLocaleString() || 'N/A'}`,
+    `  Triangles: ${report.validation.geometryStats?.triangles?.toLocaleString() || 'N/A'}`,
+    `  Triangles with paint_color: ${report.validation.geometryStats?.paintColorCount?.toLocaleString() || 'N/A'}`,
     '',
     '--- Palette ---',
     ...report.palette.map((c, i) => `  Color ${i + 1}: ${c} -> paint_color="${encodePaintColor(i)}"`),
@@ -582,28 +678,30 @@ function buildExpandedDiagnosticReport(report: ExportReport, baseName: string): 
       `  ${d.color}: ${d.count.toLocaleString()} triangles (${d.percentage.toFixed(2)}%)`
     ),
     '',
-    '--- Paint Color Stats ---',
-    `  Triangles with paint_color: ${report.totalTriangles.toLocaleString()} (100%)`,
-    `  Colors used: ${Array.from(usedColors).filter(c => c).join(', ')} (${report.palette.length} extruders)`,
-    '',
     '--- Sample Triangles (5 lines) ---',
     ...report.sampleTriangles.map(t => `  ${t}`),
     '',
-    '--- Wrapper XML (first 20 lines) ---',
+    '--- Wrapper XML (3D/3dmodel.model) ---',
     report.wrapperXmlPreview,
     '',
     '--- Object Model XML (first 50 lines) ---',
     report.objectXmlPreview,
     '',
     '--- Validation Result ---',
-    report.validation.valid ? '  ✓ All checks passed' : `  ✗ ERRORS:\n${report.validation.errors.map(e => `    - ${e}`).join('\n')}`,
+    report.validation.valid 
+      ? '  ✓ All checks passed' 
+      : `  ✗ ERRORS:\n${report.validation.errors.map(e => `    - ${e}`).join('\n')}`,
+    ...(report.validation.warnings?.length 
+      ? [`  ⚠ WARNINGS:\n${report.validation.warnings.map(w => `    - ${w}`).join('\n')}`] 
+      : []),
     '',
     '--- Manual Validation Checklist ---',
     `  1. Rename .3mf to .zip and extract`,
     `  2. Check: 3D/Objects/${baseName}.model exists`,
     `  3. Open 3D/Objects/${baseName}.model and search for paint_color=`,
     `  4. Open 3D/_rels/3dmodel.model.rels and verify Target="/3D/Objects/${baseName}.model"`,
-    `  5. Open 3D/3dmodel.model and verify p:path="/3D/Objects/${baseName}.model"`,
+    `  5. Open 3D/3dmodel.model and verify <item ... p:path="/3D/Objects/${baseName}.model">`,
+    `  6. Verify wrapper has requiredextensions="p"`,
     '',
     '=== End Report ===',
   ];

@@ -296,6 +296,102 @@ export async function extractColorsFromSources(
   };
 }
 
+/**
+ * Re-extract colors for a geometry that has been simplified.
+ * Uses UV coordinates to sample from the original texture.
+ * This is critical for maintaining color accuracy after simplification.
+ */
+export async function extractColorsFromGeometry(
+  geometry: THREE.BufferGeometry,
+  material: THREE.Material | THREE.Material[],
+  onProgress?: (progress: number, message: string) => void
+): Promise<RGB[]> {
+  const textureCache = new TextureCache();
+  const faceColors: RGB[] = [];
+  
+  const posAttr = geometry.getAttribute('position');
+  const uvAttr = geometry.getAttribute('uv');
+  const colorAttr = geometry.getAttribute('color');
+  const indexAttr = geometry.getIndex();
+  
+  if (!posAttr) {
+    console.warn('[extractColorsFromGeometry] No position attribute');
+    return faceColors;
+  }
+  
+  // Get the material (use first if array)
+  const mat = Array.isArray(material) ? material[0] : material;
+  const stdMat = mat as THREE.MeshStandardMaterial;
+  const baseColor = stdMat?.color ? threeColorToRGB(stdMat.color) : { r: 200, g: 200, b: 200 };
+  
+  // Load texture if available
+  let imageData: ImageData | null = null;
+  if (stdMat?.map) {
+    imageData = await textureCache.getImageData(stdMat.map);
+  }
+  
+  const faceCount = indexAttr 
+    ? indexAttr.count / 3 
+    : posAttr.count / 3;
+  
+  console.log(`[extractColorsFromGeometry] Processing ${faceCount} faces, hasTexture: ${!!imageData}, hasVertexColors: ${!!colorAttr}`);
+  
+  for (let faceIdx = 0; faceIdx < faceCount; faceIdx++) {
+    const base = faceIdx * 3;
+    
+    // Get vertex indices
+    const vi0 = indexAttr ? indexAttr.getX(base) : base;
+    const vi1 = indexAttr ? indexAttr.getX(base + 1) : base + 1;
+    const vi2 = indexAttr ? indexAttr.getX(base + 2) : base + 2;
+    
+    let faceColor: RGB | null = null;
+    
+    // Priority 1: Vertex colors
+    if (colorAttr && colorAttr.count > vi2) {
+      const c0 = new THREE.Color(colorAttr.getX(vi0), colorAttr.getY(vi0), colorAttr.getZ(vi0));
+      const c1 = new THREE.Color(colorAttr.getX(vi1), colorAttr.getY(vi1), colorAttr.getZ(vi1));
+      const c2 = new THREE.Color(colorAttr.getX(vi2), colorAttr.getY(vi2), colorAttr.getZ(vi2));
+      
+      const avgColor = new THREE.Color(
+        (c0.r + c1.r + c2.r) / 3,
+        (c0.g + c1.g + c2.g) / 3,
+        (c0.b + c1.b + c2.b) / 3
+      );
+      
+      faceColor = threeColorToRGB(avgColor);
+    }
+    
+    // Priority 2: Texture sampling via UV
+    if (!faceColor && imageData && uvAttr && uvAttr.count > vi2) {
+      const u = (uvAttr.getX(vi0) + uvAttr.getX(vi1) + uvAttr.getX(vi2)) / 3;
+      const v = (uvAttr.getY(vi0) + uvAttr.getY(vi1) + uvAttr.getY(vi2)) / 3;
+      
+      const textureColor = textureCache.sampleTexture(imageData, u, v, stdMat?.map?.flipY ?? true);
+      faceColor = multiplyColors(textureColor, baseColor);
+    }
+    
+    // Priority 3: Material base color
+    if (!faceColor) {
+      faceColor = baseColor;
+    }
+    
+    faceColors.push(faceColor);
+    
+    // Yield to UI periodically
+    if (faceIdx % 5000 === 0) {
+      const progress = (faceIdx / faceCount) * 100;
+      onProgress?.(progress, `Re-extraindo cores... ${Math.round(progress)}%`);
+      await yieldToUI();
+    }
+  }
+  
+  textureCache.dispose();
+  
+  console.log(`[extractColorsFromGeometry] Extracted ${faceColors.length} colors`);
+  
+  return faceColors;
+}
+
 // Convert sources to a single combined INDEXED geometry for further processing
 // This is critical for simplification: meshoptimizer requires indexed geometry with shared vertices
 // Handles negative scale transforms by flipping winding order to avoid inverted faces
@@ -409,4 +505,16 @@ export function combineSourcesToGeometry(sources: MeshSource[]): THREE.BufferGeo
   });
 
   return combinedGeometry;
+}
+
+/**
+ * Get the first valid material from mesh sources (for re-extraction after simplification)
+ */
+export function getFirstMaterialFromSources(sources: MeshSource[]): THREE.Material | null {
+  for (const source of sources) {
+    if (source.materials && source.materials.length > 0) {
+      return source.materials[0];
+    }
+  }
+  return null;
 }

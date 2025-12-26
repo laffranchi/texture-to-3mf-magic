@@ -11,21 +11,21 @@ export interface ExportModeInfo {
 
 export const EXPORT_MODES: ExportModeInfo[] = [
   {
-    id: 'mmu_segmentation',
-    label: 'MMU Segmentation',
-    description: 'Usa slic3rpe:mmu_segmentation (Prusa/Orca)',
-    slicers: ['PrusaSlicer', 'OrcaSlicer'],
+    id: 'paint_color',
+    label: 'Paint Color (Recomendado)',
+    description: 'Formato paint_color do OrcaSlicer - cores por face',
+    slicers: ['OrcaSlicer', 'PrusaSlicer', 'Bambu Studio'],
   },
   {
-    id: 'paint_color',
-    label: 'Paint Color',
-    description: 'Usa paint_color + basematerials (Bambu)',
-    slicers: ['Bambu Studio', 'OrcaSlicer'],
+    id: 'mmu_segmentation',
+    label: 'MMU Segmentation',
+    description: 'Mesmo formato paint_color (compatibilidade)',
+    slicers: ['OrcaSlicer', 'PrusaSlicer'],
   },
   {
     id: 'multi_volume',
     label: 'Multi-Volume',
-    description: 'Um volume separado por cor (universal)',
+    description: 'Um objeto separado por cor (mais compatível)',
     slicers: ['Todos os slicers'],
   },
 ];

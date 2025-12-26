@@ -9,40 +9,17 @@ export const MAX_TRIANGLES_WARNING = 500000;
 export const MAX_TRIANGLES_LIMIT = 1000000;
 
 /**
- * OrcaSlicer's CONST_FILAMENTS table for mmu_segmentation encoding.
- * Index 0 = no painting, Index 1+ = extruder number
- * Source: OrcaSlicer TriangleSelector.cpp
+ * Encode color index (0-based) to OrcaSlicer paint_color format.
+ * Formula: (colorIndex + 1) * 4, converted to uppercase hexadecimal.
+ * Examples:
+ *   colorIndex 0 -> "4"   (Extruder 1)
+ *   colorIndex 1 -> "8"   (Extruder 2)
+ *   colorIndex 2 -> "C"   (Extruder 3)
+ *   colorIndex 6 -> "1C"  (Extruder 7)
  */
-const CONST_FILAMENTS = [
-  "",    // 0: NONE (no painting)
-  "4",   // 1: Extruder 1
-  "8",   // 2: Extruder 2
-  "0C",  // 3: Extruder 3
-  "1C",  // 4: Extruder 4
-  "2C",  // 5: Extruder 5
-  "3C",  // 6: Extruder 6
-  "4C",  // 7: Extruder 7
-  "5C",  // 8: Extruder 8
-  "6C",  // 9: Extruder 9
-  "7C",  // 10: Extruder 10
-  "8C",  // 11: Extruder 11
-  "9C",  // 12: Extruder 12
-  "AC",  // 13: Extruder 13
-  "BC",  // 14: Extruder 14
-  "CC",  // 15: Extruder 15
-  "DC",  // 16: Extruder 16
-];
-
-/**
- * Encode color index (0-based) to OrcaSlicer mmu_segmentation format.
- */
-function encodeMMUSegmentation(colorIndex: number): string {
-  const extruder = colorIndex + 1;
-  if (extruder >= CONST_FILAMENTS.length) {
-    const idx = extruder - 3;
-    return `${idx.toString(16).toUpperCase()}C`;
-  }
-  return CONST_FILAMENTS[extruder];
+function encodePaintColor(colorIndex: number): string {
+  const value = (colorIndex + 1) * 4;
+  return value.toString(16).toUpperCase();
 }
 
 export interface ExportReport {
@@ -89,11 +66,9 @@ export async function export3MF(
   const sampleAttributes = sampleIndices.map(i => ({
     triangle: i,
     colorIndex: faceColorIndices[i],
-    attribute: mode === 'mmu_segmentation' 
-      ? encodeMMUSegmentation(faceColorIndices[i])
-      : mode === 'paint_color'
-        ? String(faceColorIndices[i] + 1)
-        : `volume_${faceColorIndices[i]}`,
+    attribute: mode === 'paint_color' || mode === 'mmu_segmentation'
+      ? `paint_color="${encodePaintColor(faceColorIndices[i])}"`
+      : `volume_${faceColorIndices[i]}`,
   }));
 
   console.log(`[export3MF] Mode: ${mode}`);
@@ -209,85 +184,9 @@ function buildDiagnosticReport(report: ExportReport): string {
 }
 
 /**
- * Mode 1: MMU Segmentation (PrusaSlicer/OrcaSlicer format)
- */
-function buildModelWithMMUSegmentation(
-  geometry: THREE.BufferGeometry,
-  faceColorIndices: number[],
-  palette: RGB[],
-  filename: string
-): string {
-  const positions = geometry.getAttribute('position');
-  if (!positions) return '';
-
-  const vertices: string[] = [];
-  const triangles: string[] = [];
-  const vertexMap = new Map<string, number>();
-  let vertexIndex = 0;
-  const triCount = positions.count / 3;
-
-  const baseMaterials = palette.map((color, idx) => {
-    const hex = rgbToHex(color);
-    return `      <slic3rpe:base name="Color${idx + 1}" displaycolor="${hex}" />`;
-  }).join('\n');
-
-  for (let i = 0; i < triCount; i++) {
-    const indices: number[] = [];
-
-    for (let v = 0; v < 3; v++) {
-      const idx = i * 3 + v;
-      const x = positions.getX(idx).toFixed(6);
-      const y = positions.getY(idx).toFixed(6);
-      const z = positions.getZ(idx).toFixed(6);
-      const key = `${x},${y},${z}`;
-
-      if (!vertexMap.has(key)) {
-        vertexMap.set(key, vertexIndex);
-        vertices.push(`        <vertex x="${x}" y="${y}" z="${z}" />`);
-        vertexIndex++;
-      }
-      indices.push(vertexMap.get(key)!);
-    }
-
-    const colorIdx = faceColorIndices[i] ?? 0;
-    const mmuSegmentation = encodeMMUSegmentation(colorIdx);
-    
-    triangles.push(
-      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" slic3rpe:mmu_segmentation="${mmuSegmentation}" />`
-    );
-  }
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" 
-  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-  xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">
-  <metadata name="slic3rpe:MmPaintingVersion">1</metadata>
-  <metadata name="Title">${escapeXml(filename)}</metadata>
-  <metadata name="Application">3D Texture Converter</metadata>
-  <resources>
-    <slic3rpe:basematerials id="1">
-${baseMaterials}
-    </slic3rpe:basematerials>
-    <object id="1" type="model">
-      <mesh>
-        <vertices>
-${vertices.join('\n')}
-        </vertices>
-        <triangles>
-${triangles.join('\n')}
-        </triangles>
-      </mesh>
-    </object>
-  </resources>
-  <build>
-    <item objectid="1" />
-  </build>
-</model>`;
-}
-
-/**
- * Mode 2: Paint Color (Bambu Studio format)
- * Uses standard 3MF basematerials with pid/p1 attributes
+ * Mode 1 & 2: OrcaSlicer paint_color format
+ * Uses paint_color attribute directly on triangles (no basematerials, no pid)
+ * This is the exact format OrcaSlicer uses for painted models.
  */
 function buildModelWithPaintColor(
   geometry: THREE.BufferGeometry,
@@ -304,12 +203,6 @@ function buildModelWithPaintColor(
   let vertexIndex = 0;
   const triCount = positions.count / 3;
 
-  // Standard 3MF basematerials (m: namespace)
-  const baseMaterials = palette.map((color, idx) => {
-    const hex = rgbToHex(color);
-    return `      <base name="Color${idx + 1}" displaycolor="${hex}" />`;
-  }).join('\n');
-
   for (let i = 0; i < triCount; i++) {
     const indices: number[] = [];
 
@@ -329,25 +222,25 @@ function buildModelWithPaintColor(
     }
 
     const colorIdx = faceColorIndices[i] ?? 0;
+    const paintColor = encodePaintColor(colorIdx);
     
-    // Use pid (points to basematerials id) and p1 (material index)
-    // Also add paint_color for Bambu Studio compatibility
+    // OrcaSlicer format: paint_color without namespace prefix
     triangles.push(
-      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" pid="1" p1="${colorIdx}" paint_color="${colorIdx + 1}" />`
+      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" paint_color="${paintColor}"/>`
     );
   }
 
+  // Exact header format from OrcaSlicer
   return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" 
-  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-  xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+<model unit="millimeter"
+       xml:lang="en-US"
+       xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06"
+       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
   <metadata name="Title">${escapeXml(filename)}</metadata>
   <metadata name="Application">3D Texture Converter</metadata>
   <resources>
-    <basematerials id="1">
-${baseMaterials}
-    </basematerials>
-    <object id="2" type="model">
+    <object id="1" type="model">
       <mesh>
         <vertices>
 ${vertices.join('\n')}
@@ -359,9 +252,21 @@ ${triangles.join('\n')}
     </object>
   </resources>
   <build>
-    <item objectid="2" />
+    <item objectid="1"/>
   </build>
 </model>`;
+}
+
+/**
+ * Alias for backward compatibility - both modes now use the same OrcaSlicer format
+ */
+function buildModelWithMMUSegmentation(
+  geometry: THREE.BufferGeometry,
+  faceColorIndices: number[],
+  palette: RGB[],
+  filename: string
+): string {
+  return buildModelWithPaintColor(geometry, faceColorIndices, palette, filename);
 }
 
 /**

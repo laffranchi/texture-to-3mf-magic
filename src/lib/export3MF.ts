@@ -15,42 +15,20 @@ interface ColorGroup {
 
 /**
  * Encode color index to Bambu/OrcaSlicer paint_color format.
- * Based on reverse-engineering Bambu Studio 3MF files:
- * - Color 1: "4"
- * - Color 2: "8"
- * - Color 3: "C" (12 in hex = 0C)
- * - Color 4: "1C" (16 + 12 = 28 in decimal)
- * - Color 5: "2C"
- * - Color 6: "3C"
- * - Color 7: "4C"
- * - Color 8: "5C"
- * 
- * Pattern: extruder N (1-based) -> value is (N-1) * 4 + 4, displayed in hex
- * extruder 1 -> 4 (0x04)
- * extruder 2 -> 8 (0x08)
- * extruder 3 -> 12 (0x0C -> "C")
- * extruder 4 -> 16 (0x10 -> "1C" in Bambu format, which is actually 28 = 0x1C)
- * 
- * Actually looking at the data more carefully:
- * 4 = extruder 1, 8 = extruder 2, C (12) = extruder 3, 
- * 1C (28) = extruder 4, 2C (44) = extruder 5, etc.
- * 
- * Pattern: extruder N -> (N-1) * 4 + 4, for N=1,2 it's simple
- * For N >= 3, it follows: 4, 8, C (0x0C), 1C (0x1C), 2C (0x2C), etc.
- * The "C" suffix appears from extruder 3 onwards.
+ * Pattern: extruder N (1-based)
+ * extruder 1 -> "4"
+ * extruder 2 -> "8"
+ * extruder 3 -> "C"
+ * extruder 4 -> "1C"
+ * extruder 5 -> "2C"
+ * etc.
  */
 function encodePaintColor(colorIndex: number): string {
-  // colorIndex is 0-based, convert to 1-based extruder
   const extruder = colorIndex + 1;
   
   if (extruder === 1) return '4';
   if (extruder === 2) return '8';
   
-  // For extruder 3+, use the XC pattern where X = extruder - 3
-  // extruder 3 -> "C" (0C without leading zero)
-  // extruder 4 -> "1C"
-  // extruder 5 -> "2C"
-  // etc.
   const prefix = extruder - 3;
   if (prefix === 0) return 'C';
   return `${prefix.toString(16).toUpperCase()}C`;
@@ -58,21 +36,16 @@ function encodePaintColor(colorIndex: number): string {
 
 /**
  * Export a solid mesh to 3MF format compatible with OrcaSlicer/Bambu Studio.
- * Uses the paint_color attribute per triangle for multi-material support.
- * 
- * File structure:
- * - 3D/Objects/object_1.model (with paint_color on triangles)
- * - Metadata/Slic3r_PE_model.config
+ * Uses paint_color + basematerials + INI configs for full compatibility.
  */
 export async function export3MF(exportData: ExportData, filename: string = 'model'): Promise<Blob> {
   const { geometry, faceColorIndices, palette } = exportData;
   
   const zip = new JSZip();
 
-  // Group triangles by color for logging
   const colorGroups = groupTrianglesByColor(faceColorIndices, palette);
   
-  console.log('[export3MF] Creating OrcaSlicer-compatible export with paint_color');
+  console.log('[export3MF] Creating OrcaSlicer-compatible export');
   console.log('[export3MF] Colors:', palette.length);
   console.log('[export3MF] Total triangles:', faceColorIndices.length);
   console.log('[export3MF] Color groups:', colorGroups.map(g => ({
@@ -87,6 +60,7 @@ export async function export3MF(exportData: ExportData, filename: string = 'mode
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
+  <Default Extension="config" ContentType="text/plain" />
 </Types>`;
 
   zip.file('[Content_Types].xml', contentTypes);
@@ -100,8 +74,8 @@ export async function export3MF(exportData: ExportData, filename: string = 'mode
   zip.folder('_rels');
   zip.file('_rels/.rels', rootRels);
 
-  // Build the main 3D model file (references the object)
-  const mainModel = buildMainModel(filename);
+  // Build the main 3D model with basematerials
+  const mainModel = buildMainModelWithMaterials(filename, palette);
   zip.folder('3D');
   zip.file('3D/3dmodel.model', mainModel);
   
@@ -114,19 +88,24 @@ export async function export3MF(exportData: ExportData, filename: string = 'mode
   zip.folder('3D/_rels');
   zip.file('3D/_rels/3dmodel.model.rels', modelRels);
 
-  // Build the object model with paint_color attributes
+  // Build the object model with paint_color AND pid/p1 attributes
   const objectModel = buildObjectModelWithPaintColor(geometry, faceColorIndices, palette);
   zip.folder('3D/Objects');
   zip.file('3D/Objects/object_1.model', objectModel);
 
   console.log('[export3MF] object_1.model bytes:', objectModel.length);
 
-  // Add Slic3r_PE_model.config for OrcaSlicer
-  const modelConfig = buildSlicerConfig(palette);
+  // Metadata folder with configs
   zip.folder('Metadata');
-  zip.file('Metadata/Slic3r_PE_model.config', modelConfig);
   
-  console.log('[export3MF] Slic3r_PE_model.config bytes:', modelConfig.length);
+  // Slic3r_PE.config - INI format with filament_colour
+  const slicerConfig = buildSlicerPEConfig(palette);
+  zip.file('Metadata/Slic3r_PE.config', slicerConfig);
+  console.log('[export3MF] Slic3r_PE.config:', slicerConfig);
+  
+  // Slic3r_PE_model.config - XML format for model metadata
+  const modelConfig = buildSlicerModelConfig(palette);
+  zip.file('Metadata/Slic3r_PE_model.config', modelConfig);
 
   const blob = await zip.generateAsync({ type: 'blob', mimeType: 'model/3mf' });
   return blob;
@@ -146,7 +125,6 @@ function groupTrianglesByColor(faceColorIndices: number[], palette: RGB[]): Colo
     groups.get(colorIdx)!.push(i);
   }
   
-  // Convert to array and sort by color index for consistent ordering
   const result: ColorGroup[] = [];
   const sortedKeys = Array.from(groups.keys()).sort((a, b) => a - b);
   
@@ -162,31 +140,42 @@ function groupTrianglesByColor(faceColorIndices: number[], palette: RGB[]): Colo
 }
 
 /**
- * Build main 3dmodel.model that references the object file
+ * Build main 3dmodel.model with basematerials for color definitions
  */
-function buildMainModel(filename: string): string {
+function buildMainModelWithMaterials(filename: string, palette: RGB[]): string {
+  // Build basematerials entries
+  const baseMaterials = palette.map((color, idx) => {
+    const hex = rgbToHex(color);
+    return `      <m:base name="Color${idx + 1}" displaycolor="${hex}" />`;
+  }).join('\n');
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" 
   xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+  xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
   xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
   <metadata name="Title">${escapeXml(filename)}</metadata>
   <metadata name="Application">3D Texture Converter</metadata>
   <resources>
-    <object id="1" type="model" p:path="/3D/Objects/object_1.model">
+    <m:basematerials id="1">
+${baseMaterials}
+    </m:basematerials>
+    <object id="2" type="model" p:path="/3D/Objects/object_1.model">
       <components>
         <component objectid="1" p:path="/3D/Objects/object_1.model" />
       </components>
     </object>
   </resources>
   <build>
-    <item objectid="1" />
+    <item objectid="2" />
   </build>
 </model>`;
 }
 
 /**
- * Build object model with paint_color attribute on each triangle.
- * This is the Bambu/OrcaSlicer format for multi-material painting.
+ * Build object model with paint_color AND pid/p1 for dual compatibility.
+ * - paint_color: OrcaSlicer/Bambu specific
+ * - pid/p1: Standard 3MF material reference
  */
 function buildObjectModelWithPaintColor(
   geometry: THREE.BufferGeometry,
@@ -199,18 +188,23 @@ function buildObjectModelWithPaintColor(
   const vertices: string[] = [];
   const triangles: string[] = [];
 
-  // Vertex deduplication map - use less aggressive rounding
+  // Vertex deduplication
   const vertexMap = new Map<string, number>();
   let vertexIndex = 0;
 
   const triCount = positions.count / 3;
+
+  // Build basematerials for this object too
+  const baseMaterials = palette.map((color, idx) => {
+    const hex = rgbToHex(color);
+    return `      <m:base name="Color${idx + 1}" displaycolor="${hex}" />`;
+  }).join('\n');
 
   for (let i = 0; i < triCount; i++) {
     const indices: number[] = [];
 
     for (let v = 0; v < 3; v++) {
       const idx = i * 3 + v;
-      // Use 4 decimal places for less aggressive deduplication
       const x = positions.getX(idx).toFixed(4);
       const y = positions.getY(idx).toFixed(4);
       const z = positions.getZ(idx).toFixed(4);
@@ -230,21 +224,24 @@ function buildObjectModelWithPaintColor(
     const colorIdx = faceColorIndices[i] ?? 0;
     const paintColor = encodePaintColor(colorIdx);
     
-    // Add triangle with paint_color attribute
+    // Add triangle with BOTH paint_color AND pid/p1 for compatibility
+    // pid="1" references basematerials id="1", p1 is the color index (0-based)
     triangles.push(
-      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" paint_color="${paintColor}" />`
+      `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" pid="1" p1="${colorIdx}" paint_color="${paintColor}" />`
     );
   }
 
   console.log('[buildObjectModelWithPaintColor] Vertices:', vertexIndex, 'Triangles:', triCount);
-  console.log('[buildObjectModelWithPaintColor] Sample paint_colors:', 
-    faceColorIndices.slice(0, 5).map(idx => encodePaintColor(idx)));
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" 
-  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+  xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
   <resources>
-    <object id="1" type="model">
+    <m:basematerials id="1">
+${baseMaterials}
+    </m:basematerials>
+    <object id="1" type="model" pid="1" pindex="0">
       <mesh>
         <vertices>
 ${vertices.join('\n')}
@@ -262,11 +259,28 @@ ${triangles.join('\n')}
 }
 
 /**
- * Build Slic3r_PE_model.config for OrcaSlicer/PrusaSlicer compatibility.
- * Lists the extruders/colors that are used.
+ * Build Slic3r_PE.config in INI format (what OrcaSlicer actually reads)
  */
-function buildSlicerConfig(palette: RGB[]): string {
-  // Create filament entries for each color
+function buildSlicerPEConfig(palette: RGB[]): string {
+  // Build filament_colour as semicolon-separated hex values
+  const filamentColours = palette.map(color => rgbToHex(color)).join(';');
+  
+  // Build filament_settings_id (all Generic PLA)
+  const filamentSettings = palette.map(() => 'Generic PLA').join(';');
+  
+  return `; Generated by 3D Texture Converter
+; OrcaSlicer/Bambu Studio compatible format
+
+[filament]
+filament_colour = ${filamentColours}
+filament_settings_id = ${filamentSettings}
+`;
+}
+
+/**
+ * Build Slic3r_PE_model.config - XML format for model metadata
+ */
+function buildSlicerModelConfig(palette: RGB[]): string {
   const filaments = palette.map((color, idx) => {
     const hex = rgbToHex(color);
     return `    <filament id="${idx + 1}" color="${hex}" name="Color${idx + 1}" />`;

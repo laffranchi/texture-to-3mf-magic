@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RGB, medianCut, findNearestColor } from './colorQuantization';
 import { simplifyGeometryAsync, getTriangleCount } from './meshSimplifier';
-import { MeshSource, extractColorsFromSources, combineSourcesToGeometry } from './colorExtractor';
+import { MeshSource, extractColorsFromSources, combineSourcesToGeometry, extractColorsFromGeometry, getFirstMaterialFromSources } from './colorExtractor';
 
 export type DetailLevel = 'auto' | 'low' | 'medium' | 'high';
 export type SubdivisionLevel = DetailLevel; // Alias for backward compatibility
@@ -384,19 +384,34 @@ export async function processMeshAsync(
       finalVertices: baseGeometry.getAttribute('position')?.count
     });
 
-    // Resample colors for simplified geometry
-    const simplifiedFaceCount = getTriangleCount(baseGeometry);
-    if (simplifiedFaceCount < originalFaceColors.length) {
-      const stride = Math.max(1, Math.floor(originalFaceColors.length / simplifiedFaceCount));
-      baseFaceColors = [];
-      for (let i = 0; i < originalFaceColors.length && baseFaceColors.length < simplifiedFaceCount; i += stride) {
-        baseFaceColors.push(originalFaceColors[i]);
-      }
-      console.log('[processMeshAsync] Resampled colors:', {
-        originalColors: originalFaceColors.length,
-        resampledColors: baseFaceColors.length,
-        stride
+    // Re-extract colors from the simplified geometry using UV sampling
+    // This is critical: stride-based resampling destroys spatial coherence
+    const material = getFirstMaterialFromSources(sources);
+    if (material) {
+      onProgress({
+        stage: 'sampling',
+        progress: 50,
+        message: 'Re-extraindo cores da geometria simplificada...',
       });
+      
+      baseFaceColors = await extractColorsFromGeometry(
+        baseGeometry,
+        material,
+        (progress, message) => onProgress({ stage: 'sampling', progress: 50 + progress * 0.5, message })
+      );
+      
+      console.log('[processMeshAsync] Re-extracted colors from simplified geometry:', baseFaceColors.length);
+    } else {
+      // Fallback: use original colors if no material (shouldn't happen normally)
+      console.warn('[processMeshAsync] No material found, using stride-based fallback');
+      const simplifiedFaceCount = getTriangleCount(baseGeometry);
+      if (simplifiedFaceCount < originalFaceColors.length) {
+        const stride = Math.max(1, Math.floor(originalFaceColors.length / simplifiedFaceCount));
+        baseFaceColors = [];
+        for (let i = 0; i < originalFaceColors.length && baseFaceColors.length < simplifiedFaceCount; i += stride) {
+          baseFaceColors.push(originalFaceColors[i]);
+        }
+      }
     }
 
     onProgress({

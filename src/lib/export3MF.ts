@@ -8,33 +8,17 @@ import { ExportMode } from './exportModes';
 export const MAX_TRIANGLES_WARNING = 500000;
 export const MAX_TRIANGLES_LIMIT = 1000000;
 
-/**
- * Encode color index (0-based) to OrcaSlicer paint_color format.
- * Formula: (colorIndex + 1) * 4, converted to uppercase hexadecimal.
- */
-function encodePaintColor(colorIndex: number): string {
-  const value = (colorIndex + 1) * 4;
-  return value.toString(16).toUpperCase();
-}
-
 export interface ExportReport {
   mode: ExportMode;
   totalTriangles: number;
   totalVertices: number;
   palette: string[];
   colorDistribution: { color: string; count: number; percentage: number }[];
-  sampleAttributes: { triangle: number; colorIndex: number; attribute: string }[];
+  objectStats: { colorIndex: number; color: string; vertices: number; triangles: number }[];
   files: { path: string; size: number }[];
   validation: ValidationResult;
   fileStructure: string;
-  pathVerification: {
-    relsTarget: string;
-    wrapperPath: string;
-    objectFileExists: boolean;
-  };
-  sampleTriangles: string[];
-  wrapperXmlPreview: string;
-  objectXmlPreview: string;
+  modelXmlPreview: string;
 }
 
 interface ValidationResult {
@@ -42,12 +26,19 @@ interface ValidationResult {
   errors: string[];
   warnings: string[];
   xmlParseResults: { file: string; valid: boolean; error?: string }[];
-  geometryStats: { vertices: number; triangles: number; paintColorCount: number };
+  geometryStats: { totalVertices: number; totalTriangles: number; objectCount: number };
+}
+
+/**
+ * Generate a simple UUID based on index for deterministic output
+ */
+function generateUUID(seed: number): string {
+  const hex = seed.toString(16).padStart(8, '0');
+  return `${hex}-0000-4000-8000-000000000000`;
 }
 
 /**
  * Validate XML is well-formed using DOMParser.
- * Returns parse result with any errors.
  */
 function validateXmlWellFormed(xml: string, filename: string): { valid: boolean; error?: string } {
   try {
@@ -64,118 +55,22 @@ function validateXmlWellFormed(xml: string, filename: string): { valid: boolean;
 }
 
 /**
- * Validate the 3MF structure before generating the final blob.
- * Ensures all paths, references, and XML validity are correct.
+ * Validate the 3MF structure (flat format - trimesh style).
  */
-async function validate3MFStructure(
-  zip: JSZip,
-  baseName: string
-): Promise<ValidationResult> {
+async function validate3MFStructure(zip: JSZip): Promise<ValidationResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
   const xmlParseResults: { file: string; valid: boolean; error?: string }[] = [];
-  let geometryStats = { vertices: 0, triangles: 0, paintColorCount: 0 };
+  let geometryStats = { totalVertices: 0, totalTriangles: 0, objectCount: 0 };
 
-  const objectPath = `3D/Objects/${baseName}.model`;
-  const relsPath = '3D/_rels/3dmodel.model.rels';
-  const wrapperPath = '3D/3dmodel.model';
+  const modelPath = '3D/3dmodel.model';
 
-  // Check 1: Object model exists
-  if (!zip.file(objectPath)) {
-    errors.push(`ERRO: ${objectPath} não existe no ZIP`);
+  // Check 1: Main model exists
+  if (!zip.file(modelPath)) {
+    errors.push(`ERRO: ${modelPath} não existe no ZIP`);
   }
 
-  // Check 2: .rels exists
-  if (!zip.file(relsPath)) {
-    errors.push(`ERRO: ${relsPath} não existe no ZIP`);
-  }
-
-  // Check 3: Wrapper exists
-  if (!zip.file(wrapperPath)) {
-    errors.push(`ERRO: ${wrapperPath} não existe no ZIP`);
-  }
-
-  // Check 4: Parse and validate .rels XML
-  const relsFile = zip.file(relsPath);
-  if (relsFile) {
-    const relsContent = await relsFile.async('string');
-    const parseResult = validateXmlWellFormed(relsContent, relsPath);
-    xmlParseResults.push({ file: relsPath, ...parseResult });
-    
-    if (!parseResult.valid) {
-      errors.push(`ERRO: ${relsPath} XML inválido: ${parseResult.error}`);
-    } else if (!relsContent.includes(`/3D/Objects/${baseName}.model`)) {
-      errors.push(`ERRO: .rels Target não aponta para /3D/Objects/${baseName}.model`);
-    }
-  }
-
-  // Check 5: Parse and validate wrapper XML
-  const wrapperFile = zip.file(wrapperPath);
-  if (wrapperFile) {
-    const wrapperContent = await wrapperFile.async('string');
-    const parseResult = validateXmlWellFormed(wrapperContent, wrapperPath);
-    xmlParseResults.push({ file: wrapperPath, ...parseResult });
-    
-    if (!parseResult.valid) {
-      errors.push(`ERRO: ${wrapperPath} XML inválido: ${parseResult.error}`);
-    } else {
-      // Check p:path is in <item>, not <component>
-      if (!wrapperContent.includes(`p:path="/3D/Objects/${baseName}.model"`)) {
-        errors.push(`ERRO: Wrapper <item> não contém p:path="/3D/Objects/${baseName}.model"`);
-      }
-      if (!wrapperContent.includes('requiredextensions="p"')) {
-        warnings.push(`AVISO: Wrapper não tem requiredextensions="p"`);
-      }
-    }
-  }
-
-  // Check 6: Parse and validate object model XML + geometry
-  const objectFile = zip.file(objectPath);
-  if (objectFile) {
-    const objectContent = await objectFile.async('string');
-    const parseResult = validateXmlWellFormed(objectContent, objectPath);
-    xmlParseResults.push({ file: objectPath, ...parseResult });
-    
-    if (!parseResult.valid) {
-      errors.push(`ERRO: ${objectPath} XML inválido: ${parseResult.error}`);
-    } else {
-      // Parse and count geometry
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(objectContent, 'application/xml');
-      
-      const mesh = doc.querySelector('mesh');
-      if (!mesh) {
-        errors.push(`ERRO: ${objectPath} não contém <mesh>`);
-      }
-      
-      const vertices = doc.querySelectorAll('vertex');
-      const triangles = doc.querySelectorAll('triangle');
-      
-      geometryStats.vertices = vertices.length;
-      geometryStats.triangles = triangles.length;
-      
-      if (triangles.length === 0) {
-        errors.push(`ERRO: ${objectPath} não contém triângulos`);
-      }
-      
-      // Count paint_color attributes
-      let paintColorCount = 0;
-      triangles.forEach(tri => {
-        if (tri.hasAttribute('paint_color')) {
-          paintColorCount++;
-        }
-      });
-      geometryStats.paintColorCount = paintColorCount;
-      
-      if (paintColorCount === 0) {
-        errors.push(`ERRO: ${objectPath} não contém nenhum paint_color`);
-      } else {
-        console.log(`[validate3MF] Found ${paintColorCount} triangles with paint_color`);
-      }
-    }
-  }
-
-  // Check Content_Types
+  // Check 2: Content_Types exists
   const contentTypesFile = zip.file('[Content_Types].xml');
   if (contentTypesFile) {
     const content = await contentTypesFile.async('string');
@@ -184,9 +79,11 @@ async function validate3MFStructure(
     if (!parseResult.valid) {
       errors.push(`ERRO: [Content_Types].xml inválido: ${parseResult.error}`);
     }
+  } else {
+    errors.push('ERRO: [Content_Types].xml não existe');
   }
 
-  // Check root .rels
+  // Check 3: Root .rels exists and points to model
   const rootRelsFile = zip.file('_rels/.rels');
   if (rootRelsFile) {
     const content = await rootRelsFile.async('string');
@@ -194,6 +91,56 @@ async function validate3MFStructure(
     xmlParseResults.push({ file: '_rels/.rels', ...parseResult });
     if (!parseResult.valid) {
       errors.push(`ERRO: _rels/.rels inválido: ${parseResult.error}`);
+    } else if (!content.includes('/3D/3dmodel.model')) {
+      errors.push('ERRO: _rels/.rels não aponta para /3D/3dmodel.model');
+    }
+  } else {
+    errors.push('ERRO: _rels/.rels não existe');
+  }
+
+  // Check 4: Parse and validate main model XML + geometry
+  const modelFile = zip.file(modelPath);
+  if (modelFile) {
+    const modelContent = await modelFile.async('string');
+    const parseResult = validateXmlWellFormed(modelContent, modelPath);
+    xmlParseResults.push({ file: modelPath, ...parseResult });
+
+    if (!parseResult.valid) {
+      errors.push(`ERRO: ${modelPath} XML inválido: ${parseResult.error}`);
+    } else {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(modelContent, 'application/xml');
+
+      // Count objects
+      const objects = doc.querySelectorAll('object');
+      geometryStats.objectCount = objects.length;
+
+      if (objects.length === 0) {
+        errors.push(`ERRO: ${modelPath} não contém <object>`);
+      }
+
+      // Count total vertices and triangles across all objects
+      const meshes = doc.querySelectorAll('mesh');
+      let totalVerts = 0;
+      let totalTris = 0;
+
+      meshes.forEach(mesh => {
+        totalVerts += mesh.querySelectorAll('vertex').length;
+        totalTris += mesh.querySelectorAll('triangle').length;
+      });
+
+      geometryStats.totalVertices = totalVerts;
+      geometryStats.totalTriangles = totalTris;
+
+      if (totalTris === 0) {
+        errors.push(`ERRO: ${modelPath} não contém triângulos`);
+      }
+
+      // Check build items
+      const buildItems = doc.querySelectorAll('build item');
+      if (buildItems.length === 0) {
+        errors.push(`ERRO: ${modelPath} não contém <item> em <build>`);
+      }
     }
   }
 
@@ -201,13 +148,13 @@ async function validate3MFStructure(
 }
 
 /**
- * Export to 3MF with OrcaSlicer-compatible structure.
- * Uses wrapper pattern: 3D/3dmodel.model references 3D/Objects/{name}.model
+ * Export to 3MF with flat structure (trimesh compatible).
+ * Each color becomes a separate object in the same model file.
  */
 export async function export3MF(
   exportData: ExportData,
   filename: string = 'model',
-  mode: ExportMode = 'mmu_segmentation'
+  mode: ExportMode = 'multi_volume' // Default to multi_volume (flat structure)
 ): Promise<{ blob: Blob; report: ExportReport }> {
   const { geometry, faceColorIndices, palette } = exportData;
 
@@ -216,8 +163,6 @@ export async function export3MF(
 
   const zip = new JSZip();
   const triCount = faceColorIndices.length;
-  const positions = geometry.getAttribute('position');
-  const vertexCount = positions ? positions.count : 0;
 
   // Build color distribution for report
   const colorCounts = new Map<number, number>();
@@ -233,23 +178,21 @@ export async function export3MF(
       percentage: (count / triCount) * 100,
     }));
 
-  console.log(`[export3MF] Mode: ${mode}, BaseName: ${baseName}`);
+  console.log(`[export3MF] Mode: flat (trimesh style), BaseName: ${baseName}`);
   console.log('[export3MF] Colors:', palette.length, palette.map(c => rgbToHex(c)));
   console.log('[export3MF] Total triangles:', triCount);
 
-  // ===== FILE STRUCTURE (OrcaSlicer Compatible) =====
+  // ===== FILE STRUCTURE (Flat - trimesh compatible) =====
 
   // 1. [Content_Types].xml
   const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
-  <Default Extension="config" ContentType="text/plain"/>
-  <Default Extension="png" ContentType="image/png"/>
 </Types>`;
   zip.file('[Content_Types].xml', contentTypes);
 
-  // 2. _rels/.rels (root relationships)
+  // 2. _rels/.rels (root relationships - points directly to 3D/3dmodel.model)
   const rootRels = `<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
@@ -257,61 +200,26 @@ export async function export3MF(
   zip.folder('_rels');
   zip.file('_rels/.rels', rootRels);
 
-  // 3. Create folder structure
+  // 3. Create 3D folder
   zip.folder('3D');
-  zip.folder('3D/_rels');
-  zip.folder('3D/Objects');
+
+  // 4. 3D/3dmodel.model (FLAT STRUCTURE - all geometry here)
+  const { xml: modelXml, objectStats } = buildFlatModel(geometry, faceColorIndices, palette, baseName);
+  zip.file('3D/3dmodel.model', modelXml);
+
+  // 5. Metadata folder with slicer configs
   zip.folder('Metadata');
 
-  // 4. 3D/_rels/3dmodel.model.rels (CRITICAL: links wrapper to geometry)
-  const modelRels = `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Target="/3D/Objects/${baseName}.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
-</Relationships>`;
-  zip.file('3D/_rels/3dmodel.model.rels', modelRels);
-
-  // 5. 3D/3dmodel.model (WRAPPER - references Objects/)
-  const wrapperModel = buildWrapperModel(baseName);
-  zip.file('3D/3dmodel.model', wrapperModel);
-
-  // 6. 3D/Objects/{baseName}.model (REAL GEOMETRY with paint_color)
-  let objectModelContent: string;
-  let sampleTriangles: string[] = [];
-
-  if (mode === 'multi_volume') {
-    objectModelContent = buildModelWithMultiVolume(geometry, faceColorIndices, palette, baseName);
-  } else {
-    // Both 'paint_color' and 'mmu_segmentation' use the same format
-    const result = buildObjectModel(geometry, faceColorIndices, palette, baseName);
-    objectModelContent = result.xml;
-    sampleTriangles = result.sampleTriangles;
-  }
-  zip.file(`3D/Objects/${baseName}.model`, objectModelContent);
-
-  // 7. Metadata/Slic3r_PE.config
+  // Slic3r_PE.config (filament colors)
   const slicerConfig = buildSlicerPEConfig(palette);
   zip.file('Metadata/Slic3r_PE.config', slicerConfig);
 
-  // 8. Metadata/model_settings.config (OrcaSlicer INI format)
-  const modelSettings = buildModelSettingsConfig(baseName);
-  zip.file('Metadata/model_settings.config', modelSettings);
-
-  // 9. Metadata/project_settings.config
-  const projectSettings = buildProjectSettingsConfig();
-  zip.file('Metadata/project_settings.config', projectSettings);
-
-  // 10. Metadata/slice_info.config
-  const sliceInfo = buildSliceInfoConfig();
-  zip.file('Metadata/slice_info.config', sliceInfo);
-
-  // 11. Metadata/Slic3r_PE_model.config (XML format)
-  const modelConfig = mode === 'multi_volume'
-    ? buildMultiVolumeModelConfig(palette)
-    : buildSlicerModelConfig(palette, triCount);
+  // Slic3r_PE_model.config (object configs)
+  const modelConfig = buildModelConfig(palette);
   zip.file('Metadata/Slic3r_PE_model.config', modelConfig);
 
   // ===== VALIDATION =====
-  const validation = await validate3MFStructure(zip, baseName);
+  const validation = await validate3MFStructure(zip);
 
   if (!validation.valid) {
     console.error('[export3MF] Validation FAILED:', validation.errors);
@@ -319,6 +227,7 @@ export async function export3MF(
   }
 
   console.log('[export3MF] Validation PASSED ✓');
+  console.log(`[export3MF] Objects: ${validation.geometryStats.objectCount}, Triangles: ${validation.geometryStats.totalTriangles}`);
 
   // ===== BUILD FILE LIST WITH SIZES =====
   const fileList: { path: string; size: number }[] = [];
@@ -330,37 +239,22 @@ export async function export3MF(
     }
   }
 
-  // ===== SAMPLE ATTRIBUTES FOR REPORT =====
-  const sampleIndices = [0, 1, 2, 3, 4, Math.floor(triCount / 2), triCount - 1].filter(i => i < triCount);
-  const sampleAttributes = sampleIndices.map(i => ({
-    triangle: i,
-    colorIndex: faceColorIndices[i],
-    attribute: `paint_color="${encodePaintColor(faceColorIndices[i])}"`,
-  }));
-
   // ===== BUILD REPORT =====
   const report: ExportReport = {
     mode,
     totalTriangles: triCount,
-    totalVertices: vertexCount,
+    totalVertices: validation.geometryStats.totalVertices,
     palette: palette.map(c => rgbToHex(c)),
     colorDistribution,
-    sampleAttributes,
+    objectStats,
     files: fileList,
     validation,
     fileStructure: fileList.map(f => `  ${f.path} (${formatBytes(f.size)})`).join('\n'),
-    pathVerification: {
-      relsTarget: `/3D/Objects/${baseName}.model`,
-      wrapperPath: `/3D/Objects/${baseName}.model`,
-      objectFileExists: zip.file(`3D/Objects/${baseName}.model`) !== null,
-    },
-    sampleTriangles,
-    wrapperXmlPreview: wrapperModel.split('\n').slice(0, 20).join('\n'),
-    objectXmlPreview: objectModelContent.split('\n').slice(0, 50).join('\n'),
+    modelXmlPreview: modelXml.split('\n').slice(0, 60).join('\n'),
   };
 
   // ===== DIAGNOSTIC REPORT FILE =====
-  const reportText = buildExpandedDiagnosticReport(report, baseName);
+  const reportText = buildDiagnosticReport(report);
   zip.file('Metadata/3DTextureConverter_report.txt', reportText);
 
   const blob = await zip.generateAsync({ type: 'blob', mimeType: 'model/3mf' });
@@ -368,174 +262,86 @@ export async function export3MF(
 }
 
 /**
- * Build the wrapper model XML (3D/3dmodel.model)
- * This file references the actual geometry in Objects/
+ * Build flat model XML with multiple objects (one per color).
+ * This is the trimesh-compatible format that works with OrcaSlicer.
  */
-function buildWrapperModel(baseName: string): string {
-  // CRITICAL: Use p:path directly in <item>, not in <component>
-  // This is the correct OrcaSlicer/3MF Production Extension format
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US"
-       xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
-       requiredextensions="p">
-  <metadata name="Application">3D Texture Converter</metadata>
-  <resources/>
-  <build>
-    <item objectid="1" p:path="/3D/Objects/${baseName}.model" printable="1"/>
-  </build>
-</model>`;
-}
-
-/**
- * Build the actual object model with geometry and paint_color
- * This goes in 3D/Objects/{baseName}.model
- */
-function buildObjectModel(
+function buildFlatModel(
   geometry: THREE.BufferGeometry,
   faceColorIndices: number[],
   palette: RGB[],
   baseName: string
-): { xml: string; sampleTriangles: string[] } {
+): { xml: string; objectStats: { colorIndex: number; color: string; vertices: number; triangles: number }[] } {
   const positions = geometry.getAttribute('position');
-  if (!positions) return { xml: '', sampleTriangles: [] };
-
-  const vertices: string[] = [];
-  const triangles: string[] = [];
-  const sampleTriangles: string[] = [];
-  const vertexMap = new Map<string, number>();
-  let vertexIndex = 0;
-  const triCount = positions.count / 3;
-
-  for (let i = 0; i < triCount; i++) {
-    const indices: number[] = [];
-
-    for (let v = 0; v < 3; v++) {
-      const idx = i * 3 + v;
-      const x = positions.getX(idx).toFixed(6);
-      const y = positions.getY(idx).toFixed(6);
-      const z = positions.getZ(idx).toFixed(6);
-      const key = `${x},${y},${z}`;
-
-      if (!vertexMap.has(key)) {
-        vertexMap.set(key, vertexIndex);
-        vertices.push(`        <vertex x="${x}" y="${y}" z="${z}"/>`);
-        vertexIndex++;
-      }
-      indices.push(vertexMap.get(key)!);
-    }
-
-    const colorIdx = faceColorIndices[i] ?? 0;
-    const paintColor = encodePaintColor(colorIdx);
-
-    const triangleLine = `        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}" paint_color="${paintColor}"/>`;
-    triangles.push(triangleLine);
-
-    // Collect samples for debug report
-    if (sampleTriangles.length < 5) {
-      sampleTriangles.push(triangleLine.trim());
-    }
-  }
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US"
-       xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-       xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06"
-       xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
-  <metadata name="Title">${escapeXml(baseName)}</metadata>
-  <metadata name="Application">3D Texture Converter</metadata>
-  <resources>
-    <object id="1" type="model">
-      <mesh>
-        <vertices>
-${vertices.join('\n')}
-        </vertices>
-        <triangles>
-${triangles.join('\n')}
-        </triangles>
-      </mesh>
-    </object>
-  </resources>
-  <build>
-    <item objectid="1"/>
-  </build>
-</model>`;
-
-  return { xml, sampleTriangles };
-}
-
-/**
- * Multi-Volume mode: separate objects for each color
- */
-function buildModelWithMultiVolume(
-  geometry: THREE.BufferGeometry,
-  faceColorIndices: number[],
-  palette: RGB[],
-  baseName: string
-): string {
-  const positions = geometry.getAttribute('position');
-  if (!positions) return '';
+  if (!positions) return { xml: '', objectStats: [] };
 
   const triCount = positions.count / 3;
 
   // Group triangles by color
-  const trianglesByColor: Map<number, { positions: number[][] }> = new Map();
+  const trianglesByColor: Map<number, number[][]> = new Map();
 
   for (let i = 0; i < triCount; i++) {
     const colorIdx = faceColorIndices[i] ?? 0;
 
     if (!trianglesByColor.has(colorIdx)) {
-      trianglesByColor.set(colorIdx, { positions: [] });
+      trianglesByColor.set(colorIdx, []);
     }
 
-    const tri: number[][] = [];
+    const tri: number[] = [];
     for (let v = 0; v < 3; v++) {
       const idx = i * 3 + v;
-      tri.push([
+      tri.push(
         positions.getX(idx),
         positions.getY(idx),
-        positions.getZ(idx),
-      ]);
+        positions.getZ(idx)
+      );
     }
-    trianglesByColor.get(colorIdx)!.positions.push(...tri);
+    trianglesByColor.get(colorIdx)!.push(tri);
   }
 
   // Build objects for each color
   const objects: string[] = [];
   const buildItems: string[] = [];
+  const objectStats: { colorIndex: number; color: string; vertices: number; triangles: number }[] = [];
   let objectId = 1;
 
-  for (const [colorIdx, data] of trianglesByColor.entries()) {
+  // Sort by color index for consistent output
+  const sortedColors = Array.from(trianglesByColor.keys()).sort((a, b) => a - b);
+
+  for (const colorIdx of sortedColors) {
+    const triangleData = trianglesByColor.get(colorIdx)!;
     const color = palette[colorIdx];
     const hex = rgbToHex(color);
+    const objectName = `Cor_${colorIdx + 1}`;
 
     const vertices: string[] = [];
     const triangles: string[] = [];
     const vertexMap = new Map<string, number>();
     let vertexIndex = 0;
 
-    for (let i = 0; i < data.positions.length; i += 3) {
+    // Each triangle has 9 values: x1,y1,z1,x2,y2,z2,x3,y3,z3
+    for (const tri of triangleData) {
       const indices: number[] = [];
 
       for (let v = 0; v < 3; v++) {
-        const pos = data.positions[i + v];
-        const x = pos[0].toFixed(6);
-        const y = pos[1].toFixed(6);
-        const z = pos[2].toFixed(6);
+        const x = tri[v * 3].toFixed(6);
+        const y = tri[v * 3 + 1].toFixed(6);
+        const z = tri[v * 3 + 2].toFixed(6);
         const key = `${x},${y},${z}`;
 
         if (!vertexMap.has(key)) {
           vertexMap.set(key, vertexIndex);
-          vertices.push(`          <vertex x="${x}" y="${y}" z="${z}"/>`);
+          vertices.push(`        <vertex x="${x}" y="${y}" z="${z}"/>`);
           vertexIndex++;
         }
         indices.push(vertexMap.get(key)!);
       }
 
-      triangles.push(`          <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}"/>`);
+      triangles.push(`        <triangle v1="${indices[0]}" v2="${indices[1]}" v3="${indices[2]}"/>`);
     }
 
-    objects.push(`    <object id="${objectId}" name="Color${colorIdx + 1}_${hex.replace('#', '')}" type="model">
+    const uuid = generateUUID(objectId);
+
+    objects.push(`    <object id="${objectId}" name="${objectName}" type="model" p:UUID="${uuid}">
       <mesh>
         <vertices>
 ${vertices.join('\n')}
@@ -546,11 +352,23 @@ ${triangles.join('\n')}
       </mesh>
     </object>`);
 
-    buildItems.push(`    <item objectid="${objectId}"/>`);
+    // Identity transform matrix: 1 0 0 0 1 0 0 0 1 0 0 0
+    const itemUuid = generateUUID(1000 + objectId);
+    buildItems.push(`    <item objectid="${objectId}" transform="1 0 0 0 1 0 0 0 1 0 0 0" p:UUID="${itemUuid}"/>`);
+
+    objectStats.push({
+      colorIndex: colorIdx,
+      color: hex,
+      vertices: vertices.length,
+      triangles: triangles.length,
+    });
+
     objectId++;
   }
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  const buildUuid = generateUUID(9999);
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US"
        xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
        xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
@@ -559,10 +377,12 @@ ${triangles.join('\n')}
   <resources>
 ${objects.join('\n')}
   </resources>
-  <build>
+  <build p:UUID="${buildUuid}">
 ${buildItems.join('\n')}
   </build>
 </model>`;
+
+  return { xml, objectStats };
 }
 
 // ===== METADATA CONFIG BUILDERS =====
@@ -579,57 +399,9 @@ filament_settings_id = ${filamentSettings}
 `;
 }
 
-function buildModelSettingsConfig(baseName: string): string {
-  return `; OrcaSlicer model settings
-; Generated by 3D Texture Converter
-
-[plate]
-print_sequence = 
-plate_index = 0
-label_object_enabled = 0
-
-[object:1]
-name = ${baseName}
-extruder = 1
-`;
-}
-
-function buildProjectSettingsConfig(): string {
-  return `; OrcaSlicer project settings
-; Generated by 3D Texture Converter
-
-[project]
-name = 3D Texture Converter Export
-`;
-}
-
-function buildSliceInfoConfig(): string {
-  return `; OrcaSlicer slice info
-; Generated by 3D Texture Converter
-
-[slice_info]
-plate_count = 1
-`;
-}
-
-function buildSlicerModelConfig(palette: RGB[], triCount: number): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<config>
-  <object id="1">
-    <metadata type="object" key="name" value="MultiColorModel"/>
-    <metadata type="object" key="extruder" value="1"/>
-    <volume firstid="0" lastid="${triCount - 1}">
-      <metadata type="volume" key="name" value="ColoredMesh"/>
-      <metadata type="volume" key="volume_type" value="ModelPart"/>
-      <metadata type="volume" key="extruder" value="1"/>
-    </volume>
-  </object>
-</config>`;
-}
-
-function buildMultiVolumeModelConfig(palette: RGB[]): string {
-  const objectConfigs = palette.map((_, idx) => `  <object id="${idx + 1}">
-    <metadata type="object" key="name" value="Color${idx + 1}"/>
+function buildModelConfig(palette: RGB[]): string {
+  const objectConfigs = palette.map((color, idx) => `  <object id="${idx + 1}">
+    <metadata type="object" key="name" value="Cor_${idx + 1}"/>
     <metadata type="object" key="extruder" value="${idx + 1}"/>
   </object>`).join('\n');
 
@@ -639,69 +411,56 @@ ${objectConfigs}
 </config>`;
 }
 
-// ===== EXPANDED DIAGNOSTIC REPORT =====
+// ===== DIAGNOSTIC REPORT =====
 
-function buildExpandedDiagnosticReport(report: ExportReport, baseName: string): string {
-  const usedColors = new Set<string>();
-  report.sampleAttributes.forEach(s => {
-    usedColors.add(s.attribute.match(/paint_color="([^"]+)"/)?.[1] || '');
-  });
-
+function buildDiagnosticReport(report: ExportReport): string {
   const lines = [
-    '=== 3D Texture Converter - Debug Report ===',
+    '=== 3D Texture Converter - Export Report ===',
     `Date: ${new Date().toISOString()}`,
-    `Export Mode: ${report.mode}`,
+    `Export Mode: Flat Structure (trimesh compatible)`,
     '',
-    '--- ZIP File Tree ---',
+    '--- File Structure ---',
     report.fileStructure,
     '',
-    '--- XML Parse Validation ---',
-    ...(report.validation.xmlParseResults?.map(r => 
+    '--- XML Validation ---',
+    ...(report.validation.xmlParseResults?.map(r =>
       `  ${r.file}: ${r.valid ? 'OK ✓' : `ERRO ✗ - ${r.error}`}`
     ) || ['  (no parse results)']),
     '',
-    '--- Path Verification ---',
-    `  .rels Target: ${report.pathVerification.relsTarget} ${report.pathVerification.objectFileExists ? '✓' : '✗'}`,
-    `  Wrapper p:path: ${report.pathVerification.wrapperPath} ${report.pathVerification.objectFileExists ? '✓' : '✗'}`,
-    `  Object file exists: ${report.pathVerification.objectFileExists ? 'YES ✓' : 'NO ✗'}`,
+    '--- Geometry Stats ---',
+    `  Total Objects: ${report.validation.geometryStats?.objectCount || 0}`,
+    `  Total Vertices: ${report.validation.geometryStats?.totalVertices?.toLocaleString() || 'N/A'}`,
+    `  Total Triangles: ${report.validation.geometryStats?.totalTriangles?.toLocaleString() || 'N/A'}`,
     '',
-    '--- Geometry Stats (from XML parse) ---',
-    `  Vertices: ${report.validation.geometryStats?.vertices?.toLocaleString() || 'N/A'}`,
-    `  Triangles: ${report.validation.geometryStats?.triangles?.toLocaleString() || 'N/A'}`,
-    `  Triangles with paint_color: ${report.validation.geometryStats?.paintColorCount?.toLocaleString() || 'N/A'}`,
+    '--- Objects by Color ---',
+    ...report.objectStats.map(o =>
+      `  ${o.color} (Color ${o.colorIndex + 1}): ${o.triangles.toLocaleString()} triangles, ${o.vertices.toLocaleString()} vertices`
+    ),
     '',
     '--- Palette ---',
-    ...report.palette.map((c, i) => `  Color ${i + 1}: ${c} -> paint_color="${encodePaintColor(i)}"`),
+    ...report.palette.map((c, i) => `  Cor_${i + 1}: ${c}`),
     '',
     '--- Color Distribution ---',
     ...report.colorDistribution.map(d =>
       `  ${d.color}: ${d.count.toLocaleString()} triangles (${d.percentage.toFixed(2)}%)`
     ),
     '',
-    '--- Sample Triangles (5 lines) ---',
-    ...report.sampleTriangles.map(t => `  ${t}`),
-    '',
-    '--- Wrapper XML (3D/3dmodel.model) ---',
-    report.wrapperXmlPreview,
-    '',
-    '--- Object Model XML (first 50 lines) ---',
-    report.objectXmlPreview,
+    '--- Model XML Preview (first 60 lines) ---',
+    report.modelXmlPreview,
     '',
     '--- Validation Result ---',
-    report.validation.valid 
-      ? '  ✓ All checks passed' 
+    report.validation.valid
+      ? '  ✓ All checks passed - File should open in OrcaSlicer'
       : `  ✗ ERRORS:\n${report.validation.errors.map(e => `    - ${e}`).join('\n')}`,
-    ...(report.validation.warnings?.length 
-      ? [`  ⚠ WARNINGS:\n${report.validation.warnings.map(w => `    - ${w}`).join('\n')}`] 
+    ...(report.validation.warnings?.length
+      ? [`  ⚠ WARNINGS:\n${report.validation.warnings.map(w => `    - ${w}`).join('\n')}`]
       : []),
     '',
-    '--- Manual Validation Checklist ---',
-    `  1. Rename .3mf to .zip and extract`,
-    `  2. Check: 3D/Objects/${baseName}.model exists`,
-    `  3. Open 3D/Objects/${baseName}.model and search for paint_color=`,
-    `  4. Open 3D/_rels/3dmodel.model.rels and verify Target="/3D/Objects/${baseName}.model"`,
-    `  5. Open 3D/3dmodel.model and verify <item ... p:path="/3D/Objects/${baseName}.model">`,
-    `  6. Verify wrapper has requiredextensions="p"`,
+    '--- Usage in OrcaSlicer ---',
+    '  1. Open File > Import > Import 3MF',
+    '  2. Each color appears as a separate object',
+    '  3. Right-click object > Change Filament to assign extruder',
+    '  4. Colors in palette match the RGB values shown above',
     '',
     '=== End Report ===',
   ];

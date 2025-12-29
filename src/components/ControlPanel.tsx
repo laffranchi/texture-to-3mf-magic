@@ -1,7 +1,5 @@
 import { DetailLevel, getEstimatedTriangleCount } from '@/lib/meshProcessor';
 import { RGB, rgbToHex } from '@/lib/colorQuantization';
-import { ExportMode } from '@/lib/exportModes';
-import { ExportModeSelector } from '@/components/ExportModeSelector';
 import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
 import { 
@@ -14,7 +12,6 @@ import {
   EyeOff
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-
 const DETAIL_OPTIONS: { value: DetailLevel; label: string; description: string }[] = [
   { value: 'auto', label: 'Auto', description: 'Otimizado automaticamente' },
   { value: 'low', label: 'Baixo', description: '~100k triângulos' },
@@ -53,10 +50,6 @@ interface ControlPanelProps {
   // Safety
   estimatedTriangles?: number;
   exceedsLimit?: boolean;
-  
-  // Export mode
-  exportMode?: ExportMode;
-  onExportModeChange?: (mode: ExportMode) => void;
 }
 
 export function ControlPanel({
@@ -75,8 +68,6 @@ export function ControlPanel({
   processedTriangles,
   estimatedTriangles: propEstimatedTriangles,
   exceedsLimit = false,
-  exportMode = 'multi_volume',
-  onExportModeChange,
 }: ControlPanelProps) {
   const estimatedTriangles = propEstimatedTriangles ?? getEstimatedTriangleCount(originalTriangles, detailLevel);
   const willSimplify = originalTriangles > estimatedTriangles;
@@ -246,14 +237,6 @@ export function ControlPanel({
             </div>
           </div>
 
-          {/* Export Mode Selector */}
-          {onExportModeChange && (
-            <ExportModeSelector 
-              value={exportMode} 
-              onChange={onExportModeChange}
-            />
-          )}
-
           {/* Export Button */}
           <Button
             onClick={onExport}
@@ -265,7 +248,7 @@ export function ControlPanel({
           </Button>
 
           <p className="text-xs text-center text-muted-foreground">
-            {colorStats.length} cores • modo: {exportMode}
+            {colorStats.length} cores
           </p>
         </div>
       )}

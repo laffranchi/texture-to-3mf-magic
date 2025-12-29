@@ -2,8 +2,6 @@ import { useRef, useMemo, Suspense } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Environment, Center, Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { ProcessedMesh } from '@/lib/meshProcessor';
-import { rgbToHex } from '@/lib/colorQuantization';
 
 interface OriginalModelProps {
   object: THREE.Object3D;
@@ -17,25 +15,6 @@ function OriginalModel({ object }: OriginalModelProps) {
   return (
     <group>
       <primitive object={clonedScene} />
-    </group>
-  );
-}
-
-interface ProcessedModelProps {
-  meshes: ProcessedMesh[];
-}
-
-function ProcessedModel({ meshes }: ProcessedModelProps) {
-  return (
-    <group>
-      {meshes.map((mesh, idx) => (
-        <mesh key={idx} geometry={mesh.geometry}>
-          {/* Use MeshBasicMaterial for true color display (unlit) */}
-          <meshBasicMaterial 
-            color={rgbToHex(mesh.color)} 
-          />
-        </mesh>
-      ))}
     </group>
   );
 }
@@ -59,14 +38,12 @@ function LoadingFallback() {
 
 interface ModelViewerProps {
   originalObject?: THREE.Object3D;
-  processedMeshes?: ProcessedMesh[];
   showProcessed?: boolean;
   className?: string;
 }
 
 export function ModelViewer({ 
   originalObject, 
-  processedMeshes, 
   showProcessed = false,
   className 
 }: ModelViewerProps) {
@@ -85,9 +62,7 @@ export function ModelViewer({
         <Suspense fallback={<LoadingFallback />}>
           <Center>
             <group>
-              {showProcessed && processedMeshes ? (
-                <ProcessedModel meshes={processedMeshes} />
-              ) : originalObject ? (
+              {originalObject ? (
                 <OriginalModel object={originalObject} />
               ) : (
                 <LoadingFallback />

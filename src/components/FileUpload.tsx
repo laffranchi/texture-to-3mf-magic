@@ -73,8 +73,7 @@ export function FileUpload({ onFilesSelected, loading, disabled }: FileUploadPro
       >
         <input
           type="file"
-          multiple
-          accept=".glb,.gltf,.obj,.mtl,.png,.jpg,.jpeg"
+          accept=".glb"
           onChange={handleFileInput}
           disabled={disabled || loading}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
@@ -96,16 +95,12 @@ export function FileUpload({ onFilesSelected, loading, disabled }: FileUploadPro
               {loading ? 'Carregando modelo...' : 'Arraste seu modelo 3D aqui'}
             </p>
             <p className="text-sm text-muted-foreground mt-1">
-              GLB, GLTF, ou OBJ + MTL + Textura
+              Apenas arquivos GLB
             </p>
           </div>
           
           <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
             <span className="px-2 py-1 bg-secondary rounded">.glb</span>
-            <span className="px-2 py-1 bg-secondary rounded">.gltf</span>
-            <span className="px-2 py-1 bg-secondary rounded">.obj</span>
-            <span className="px-2 py-1 bg-secondary rounded">.mtl</span>
-            <span className="px-2 py-1 bg-secondary rounded">.png/.jpg</span>
           </div>
         </div>
       </div>
@@ -113,7 +108,7 @@ export function FileUpload({ onFilesSelected, loading, disabled }: FileUploadPro
       {selectedFiles.length > 0 && (
         <div className="mt-4 space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-foreground">Arquivos selecionados:</span>
+            <span className="text-sm font-medium text-foreground">Arquivo selecionado:</span>
             <button
               onClick={clearFiles}
               className="text-xs text-muted-foreground hover:text-destructive transition-colors"

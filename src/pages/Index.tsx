@@ -1,15 +1,16 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Header } from '@/components/Header';
 import { FileUpload } from '@/components/FileUpload';
 import { ModelViewer } from '@/components/ModelViewer';
 import { ControlPanel } from '@/components/ControlPanel';
 import { Inspector3MF } from '@/components/Inspector3MF';
+import { LogViewer } from '@/components/LogViewer';
 import { useModelLoader } from '@/hooks/useModelLoader';
-import { convertModel, downloadBase64File, PaletteColor } from '@/lib/api';
+import { convertModel, downloadBase64File, checkApiHealth, PaletteColor } from '@/lib/api';
+import { logger } from '@/lib/logger';
 import { toast } from 'sonner';
 import { AlertCircle, ArrowLeft, Info, FileSearch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-
 export default function Index() {
   const { model, loading, error, loadModel, clearModel } = useModelLoader();
   
@@ -20,6 +21,16 @@ export default function Index() {
   const [file3MF, setFile3MF] = useState<string | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
   const [showInspector, setShowInspector] = useState(false);
+
+  // Check API health on mount
+  useEffect(() => {
+    logger.info('App', 'Aplicação iniciada');
+    checkApiHealth().then(status => {
+      if (!status.online) {
+        logger.warn('App', 'API pode estar em cold start, primeira requisição pode demorar');
+      }
+    });
+  }, []);
 
   const handleProcess = useCallback(async () => {
     if (!model?.rawFile) return;
@@ -237,6 +248,9 @@ export default function Index() {
           <p>Processamento seguro via API • Seus arquivos não são armazenados</p>
         </div>
       </footer>
+      
+      {/* Log Viewer */}
+      <LogViewer />
     </div>
   );
 }

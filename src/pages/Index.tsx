@@ -16,7 +16,6 @@ import {
   estimateProcessingTime
 } from '@/lib/meshProcessor';
 import { export3MF, downloadBlob, MAX_TRIANGLES_WARNING, MAX_TRIANGLES_LIMIT, ExportReport } from '@/lib/export3MF';
-import { ExportMode } from '@/lib/exportModes';
 import { toast } from 'sonner';
 import { AlertCircle, ArrowLeft, AlertTriangle, Info, FileSearch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -30,7 +29,6 @@ export default function Index() {
   const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [showProcessed, setShowProcessed] = useState(false);
-  const [exportMode, setExportMode] = useState<ExportMode>('multi_volume');
   const [showInspector, setShowInspector] = useState(false);
   const [lastExportReport, setLastExportReport] = useState<ExportReport | null>(null);
 
@@ -88,11 +86,11 @@ export default function Index() {
     }
 
     try {
-      const { blob, report } = await export3MF(processingResult.exportData, model.name, exportMode);
+      const { blob, report } = await export3MF(processingResult.exportData, model.name);
       setLastExportReport(report);
       downloadBlob(blob, `${model.name}_multi-material.3mf`);
       
-      toast.success(`3MF exportado (modo: ${exportMode})`, {
+      toast.success('3MF exportado!', {
         description: `${report.totalTriangles.toLocaleString()} triângulos, ${report.palette.length} cores`,
       });
       
@@ -101,7 +99,7 @@ export default function Index() {
       toast.error('Erro ao exportar 3MF');
       console.error(err);
     }
-  }, [processingResult, model, exportMode]);
+  }, [processingResult, model]);
 
   const handleReset = useCallback(() => {
     clearModel();
@@ -290,8 +288,6 @@ export default function Index() {
                 processedTriangles={processingResult?.processedTriangles}
                 estimatedTriangles={estimatedTriangles}
                 exceedsLimit={exceedsLimit}
-                exportMode={exportMode}
-                onExportModeChange={setExportMode}
               />
               
               {/* Inspector Button */}
@@ -309,7 +305,6 @@ export default function Index() {
                 <div className="p-3 bg-secondary/50 rounded-lg border border-border">
                   <p className="text-xs text-muted-foreground mb-2">Último Export:</p>
                   <div className="text-xs font-mono text-foreground space-y-1">
-                    <p>Modo: {lastExportReport.mode}</p>
                     <p>Triângulos: {lastExportReport.totalTriangles.toLocaleString()}</p>
                     <p>Cores únicas: {lastExportReport.colorDistribution.length}</p>
                   </div>

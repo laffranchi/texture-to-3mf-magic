@@ -2,14 +2,12 @@ import JSZip from 'jszip';
 import * as THREE from 'three';
 import { ExportData } from './meshProcessor';
 import { rgbToHex, RGB } from './colorQuantization';
-import { ExportMode } from './exportModes';
 
 // Maximum recommended triangles for OrcaSlicer compatibility
 export const MAX_TRIANGLES_WARNING = 500000;
 export const MAX_TRIANGLES_LIMIT = 1000000;
 
 export interface ExportReport {
-  mode: ExportMode;
   totalTriangles: number;
   totalVertices: number;
   palette: string[];
@@ -153,8 +151,7 @@ async function validate3MFStructure(zip: JSZip): Promise<ValidationResult> {
  */
 export async function export3MF(
   exportData: ExportData,
-  filename: string = 'model',
-  mode: ExportMode = 'multi_volume' // Default to multi_volume (flat structure)
+  filename: string = 'model'
 ): Promise<{ blob: Blob; report: ExportReport }> {
   const { geometry, faceColorIndices, palette } = exportData;
 
@@ -241,7 +238,6 @@ export async function export3MF(
 
   // ===== BUILD REPORT =====
   const report: ExportReport = {
-    mode,
     totalTriangles: triCount,
     totalVertices: validation.geometryStats.totalVertices,
     palette: palette.map(c => rgbToHex(c)),

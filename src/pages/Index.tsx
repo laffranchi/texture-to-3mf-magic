@@ -1,84 +1,110 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { Header } from '@/components/Header';
 import { FileUpload } from '@/components/FileUpload';
 import { ModelViewer } from '@/components/ModelViewer';
 import { ControlPanel } from '@/components/ControlPanel';
+import { ProgressBar } from '@/components/ProgressBar';
 import { Inspector3MF } from '@/components/Inspector3MF';
-import { LogViewer } from '@/components/LogViewer';
 import { useModelLoader } from '@/hooks/useModelLoader';
-import { convertModel, downloadBase64File, checkApiHealth, PaletteColor } from '@/lib/api';
-import { logger } from '@/lib/logger';
+import { 
+  processMeshAsync, 
+  DetailLevel, 
+  ProcessingResult, 
+  ProcessingProgress,
+  getEstimatedTriangleCount,
+  TRIANGLE_LIMITS,
+  estimateProcessingTime
+} from '@/lib/meshProcessor';
+import { export3MF, downloadBlob, MAX_TRIANGLES_WARNING, MAX_TRIANGLES_LIMIT, ExportReport } from '@/lib/export3MF';
 import { toast } from 'sonner';
-import { AlertCircle, ArrowLeft, Info, FileSearch } from 'lucide-react';
+import { AlertCircle, ArrowLeft, AlertTriangle, Info, FileSearch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+
 export default function Index() {
   const { model, loading, error, loadModel, clearModel } = useModelLoader();
   
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>('auto');
   const [numColors, setNumColors] = useState(4);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingMessage, setProcessingMessage] = useState<string | null>(null);
-  const [palette, setPalette] = useState<PaletteColor[] | null>(null);
-  const [file3MF, setFile3MF] = useState<string | null>(null);
-  const [filename, setFilename] = useState<string | null>(null);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
+  const [showProcessed, setShowProcessed] = useState(false);
   const [showInspector, setShowInspector] = useState(false);
+  const [lastExportReport, setLastExportReport] = useState<ExportReport | null>(null);
 
-  // Check API health on mount
-  useEffect(() => {
-    logger.info('App', 'Aplicação iniciada');
-    checkApiHealth().then(status => {
-      if (!status.online) {
-        logger.warn('App', 'API pode estar em cold start, primeira requisição pode demorar');
-      }
-    });
-  }, []);
+  // Calculate estimated triangles and warnings
+  const estimatedTriangles = model ? getEstimatedTriangleCount(model.triangleCount, detailLevel) : 0;
+  const showWarning = estimatedTriangles > TRIANGLE_LIMITS.WARNING;
+  const exceedsLimit = estimatedTriangles > TRIANGLE_LIMITS.MAX;
+  const estimatedTime = model ? estimateProcessingTime(model.triangleCount, detailLevel) : 0;
 
   const handleProcess = useCallback(async () => {
-    if (!model?.rawFile) return;
+    if (!model) return;
+
+    if (exceedsLimit) {
+      toast.error(`Limite excedido! Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()} triângulos.`);
+      return;
+    }
 
     setIsProcessing(true);
-    setProcessingMessage('Enviando para processamento...');
-    setPalette(null);
-    setFile3MF(null);
-    setFilename(null);
+    setShowProcessed(false);
+    setProcessingProgress({ stage: 'simplifying', progress: 0, message: 'Iniciando...' });
     
     try {
-      const result = await convertModel(
-        model.rawFile,
+      const result = await processMeshAsync(
+        model.sources,
+        detailLevel,
         numColors,
-        setProcessingMessage
+        setProcessingProgress
       );
       
-      setPalette(result.palette);
-      setFile3MF(result.file_base64);
-      setFilename(result.filename);
-      toast.success(`Processado! ${result.palette.length} cores extraídas.`);
+      setProcessingResult(result);
+      setShowProcessed(true);
+      toast.success(`Processado! ${result.meshes.length} meshes criadas.`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Erro ao processar';
-      toast.error(message);
-      console.error('[API Error]', err);
+      toast.error('Erro ao processar modelo');
+      console.error(err);
     } finally {
       setIsProcessing(false);
-      setProcessingMessage(null);
+      setProcessingProgress(null);
     }
-  }, [model, numColors]);
+  }, [model, detailLevel, numColors, exceedsLimit]);
 
-  const handleDownload = useCallback(() => {
-    if (!file3MF || !filename) return;
+  const handleExport = useCallback(async () => {
+    if (!processingResult || !model) return;
+
+    const triCount = processingResult.processedTriangles;
     
-    try {
-      downloadBase64File(file3MF, filename);
-      toast.success('3MF baixado com sucesso!');
-    } catch (err) {
-      toast.error('Erro ao baixar arquivo');
-      console.error('[Download Error]', err);
+    // Warn about high triangle count for OrcaSlicer
+    if (triCount > MAX_TRIANGLES_LIMIT) {
+      toast.error(`Modelo muito grande (${triCount.toLocaleString()} triângulos). OrcaSlicer pode não importar corretamente. Use um nível de detalhe mais baixo.`);
+      return;
     }
-  }, [file3MF, filename]);
+    
+    if (triCount > MAX_TRIANGLES_WARNING) {
+      toast.warning(`Modelo grande (${triCount.toLocaleString()} triângulos). O import no OrcaSlicer pode ser lento.`);
+    }
+
+    try {
+      const { blob, report } = await export3MF(processingResult.exportData, model.name);
+      setLastExportReport(report);
+      downloadBlob(blob, `${model.name}_multi-material.3mf`);
+      
+      toast.success('3MF exportado!', {
+        description: `${report.totalTriangles.toLocaleString()} triângulos, ${report.palette.length} cores`,
+      });
+      
+      console.log('[Export Report]', report);
+    } catch (err) {
+      toast.error('Erro ao exportar 3MF');
+      console.error(err);
+    }
+  }, [processingResult, model]);
 
   const handleReset = useCallback(() => {
     clearModel();
-    setPalette(null);
-    setFile3MF(null);
-    setFilename(null);
+    setProcessingResult(null);
+    setShowProcessed(false);
   }, [clearModel]);
 
   return (
@@ -97,7 +123,7 @@ export default function Index() {
                 Converta Texturas 3D para Multi-Material
               </h2>
               <p className="text-muted-foreground">
-                Carregue um modelo GLB texturizado e exporte um 3MF com meshes separadas por cor,
+                Carregue um modelo GLB ou OBJ texturizado e exporte um 3MF com meshes separadas por cor,
                 pronto para impressão colorida no AMS/Bambu Studio/OrcaSlicer.
               </p>
             </div>
@@ -122,21 +148,21 @@ export default function Index() {
                 <div className="text-2xl mb-2">📤</div>
                 <h3 className="font-medium text-foreground">1. Upload</h3>
                 <p className="text-sm text-muted-foreground">
-                  Carregue um arquivo GLB com textura
+                  Carregue GLB ou OBJ com textura
                 </p>
               </div>
               <div className="p-4 bg-card rounded-lg border border-border">
                 <div className="text-2xl mb-2">🎨</div>
                 <h3 className="font-medium text-foreground">2. Configure</h3>
                 <p className="text-sm text-muted-foreground">
-                  Escolha a quantidade de cores (2-16)
+                  Escolha nível de detalhe e quantidade de cores
                 </p>
               </div>
               <div className="p-4 bg-card rounded-lg border border-border">
                 <div className="text-2xl mb-2">📦</div>
-                <h3 className="font-medium text-foreground">3. Baixe</h3>
+                <h3 className="font-medium text-foreground">3. Exporte</h3>
                 <p className="text-sm text-muted-foreground">
-                  Receba o 3MF pronto para imprimir
+                  Baixe 3MF com meshes separadas por cor
                 </p>
               </div>
             </div>
@@ -176,7 +202,8 @@ export default function Index() {
               <div className="aspect-[4/3] lg:aspect-[16/10] rounded-lg overflow-hidden border border-border viewer-gradient">
                 <ModelViewer
                   originalObject={model.originalObject}
-                  showProcessed={false}
+                  processedMeshes={processingResult?.meshes}
+                  showProcessed={showProcessed}
                   className="w-full h-full"
                 />
               </div>
@@ -196,20 +223,48 @@ export default function Index() {
                 </div>
               )}
 
-              {/* Processing indicator */}
-              {isProcessing && (
-                <div className="p-3 bg-primary/10 border border-primary/20 rounded-lg text-center">
-                  <p className="text-sm text-primary animate-pulse">
-                    {processingMessage || 'Processando...'}
+              {/* Processing Progress */}
+              {isProcessing && processingProgress && (
+                <ProgressBar progress={processingProgress} />
+              )}
+
+              {/* Warning for high triangle count */}
+              {!isProcessing && showWarning && (
+                <div className="p-3 bg-warning/10 border border-warning/20 rounded-lg flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-warning">
+                      {exceedsLimit ? 'Limite excedido!' : 'Alto número de triângulos'}
+                    </p>
+                    <p className="text-xs text-warning/80">
+                      {exceedsLimit 
+                        ? `Máximo: ${TRIANGLE_LIMITS.MAX.toLocaleString()}. Reduza o nível de detalhe.`
+                        : `Estimativa: ${estimatedTriangles.toLocaleString()} triângulos (~${estimatedTime}s)`
+                      }
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Processing Debug Info */}
+              {showProcessed && processingResult?.debugInfo && (
+                <div className="p-3 bg-primary/10 border border-primary/20 rounded-lg">
+                  <p className="text-xs text-primary/80">
+                    <span className="font-medium">Cores extraídas:</span>{' '}
+                    {processingResult.debugInfo.facesWithTexture > 0 && 
+                      `${processingResult.debugInfo.facesWithTexture} faces c/ textura`}
+                    {processingResult.debugInfo.facesWithVertexColor > 0 && 
+                      ` • ${processingResult.debugInfo.facesWithVertexColor} c/ vertex color`}
+                    {processingResult.debugInfo.facesWithMaterialColor > 0 && 
+                      ` • ${processingResult.debugInfo.facesWithMaterialColor} c/ cor do material`}
                   </p>
                 </div>
               )}
 
-              {/* Success indicator */}
-              {palette && palette.length > 0 && !isProcessing && (
+              {showProcessed && processingResult && (
                 <div className="flex items-center justify-center gap-2 text-sm">
                   <span className="px-3 py-1 bg-primary/20 text-primary rounded-full">
-                    ✓ Modelo processado com {palette.length} cores
+                    Visualizando: Modelo Processado
                   </span>
                 </div>
               )}
@@ -219,14 +274,20 @@ export default function Index() {
             <div className="lg:sticky lg:top-4 lg:self-start space-y-4">
               <ControlPanel
                 originalTriangles={model.triangleCount}
+                detailLevel={detailLevel}
+                onDetailLevelChange={setDetailLevel}
                 numColors={numColors}
                 onNumColorsChange={setNumColors}
                 isProcessing={isProcessing}
-                isProcessed={!!palette && palette.length > 0}
+                isProcessed={!!processingResult}
                 onProcess={handleProcess}
-                onDownload={handleDownload}
-                palette={palette || undefined}
-                processingMessage={processingMessage || undefined}
+                showProcessed={showProcessed}
+                onTogglePreview={() => setShowProcessed(!showProcessed)}
+                onExport={handleExport}
+                colorStats={processingResult?.colorStats}
+                processedTriangles={processingResult?.processedTriangles}
+                estimatedTriangles={estimatedTriangles}
+                exceedsLimit={exceedsLimit}
               />
               
               {/* Inspector Button */}
@@ -238,6 +299,17 @@ export default function Index() {
                 <FileSearch className="w-4 h-4" />
                 Inspector 3MF
               </Button>
+              
+              {/* Last Export Report */}
+              {lastExportReport && (
+                <div className="p-3 bg-secondary/50 rounded-lg border border-border">
+                  <p className="text-xs text-muted-foreground mb-2">Último Export:</p>
+                  <div className="text-xs font-mono text-foreground space-y-1">
+                    <p>Triângulos: {lastExportReport.totalTriangles.toLocaleString()}</p>
+                    <p>Cores únicas: {lastExportReport.colorDistribution.length}</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -245,12 +317,9 @@ export default function Index() {
 
       <footer className="border-t border-border mt-12 py-6">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <p>Processamento seguro via API • Seus arquivos não são armazenados</p>
+          <p>Processamento 100% local no navegador • Seus arquivos não são enviados</p>
         </div>
       </footer>
-      
-      {/* Log Viewer */}
-      <LogViewer />
     </div>
   );
 }
